@@ -464,9 +464,9 @@ public sealed class IframeAssetCache
             // Retry once with software decode — ffmpeg can always handle the
             // source if the GPU path is misbehaving for this specific codec.
             _logger.LogWarning(
-                "[NativeTrickplay] hwaccel decode failed for {Input}, retrying with software decode. ffmpeg said: {FirstLine}",
+                "[NativeTrickplay] hwaccel decode failed for {Input}, retrying with software decode.\nffmpeg stderr:\n{Stderr}",
                 inputPath,
-                FirstLine(ex.Message));
+                TailLines(ex.Message, 12));
         }
 
         await RunProcessAsync(_encoder.EncoderPath,
@@ -652,6 +652,27 @@ public sealed class IframeAssetCache
     {
         var idx = s.IndexOf('\n');
         return idx < 0 ? s : s[..idx];
+    }
+
+    /// <summary>
+    /// Return the last <paramref name="n"/> non-empty lines of a multi-line
+    /// string, joined with newlines. Used for hwaccel failure logging:
+    /// libva / ffmpeg often print informational lines first ("VA-API version
+    /// X.Y.Z") and the actual error at the end, so the tail tends to be
+    /// the actionable part for the user.
+    /// </summary>
+    private static string TailLines(string s, int n)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        var lines = s.Split('\n');
+        var keep = new List<string>(n);
+        for (int i = lines.Length - 1; i >= 0 && keep.Count < n; i--)
+        {
+            var line = lines[i].TrimEnd('\r');
+            if (!string.IsNullOrWhiteSpace(line)) keep.Add(line);
+        }
+        keep.Reverse();
+        return string.Join('\n', keep);
     }
 
     private void AppendHwaccelArgs(PluginConfiguration cfg, List<string> args)
