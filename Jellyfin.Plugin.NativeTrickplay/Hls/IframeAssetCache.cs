@@ -584,17 +584,17 @@ public sealed class IframeAssetCache
     private async Task RunFfmpegAsync(string inputPath, string outputPath, IframeVariant variant, CancellationToken ct)
     {
         var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
-        var isHdrSource = DetectHdrFromPath(inputPath);
+        var (isHdrSource, is10BitSource) = ProbeSourceVideo(inputPath);
 
         // First attempt: with hwaccel if configured.
         var hwaccelArgs = new List<string>();
         AppendHwaccelArgs(cfg, hwaccelArgs);
 
-        var primaryArgs = BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs, isHdrSource);
+        var primaryArgs = BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs, isHdrSource, is10BitSource);
         _logger.LogInformation(
-            "[NativeTrickplay] ffmpeg invoke (hwaccel={Hwaccel}, preset={Preset}, crf={Crf}, width={Width}, interval={Interval}s, sourceHdr={IsHdr})",
+            "[NativeTrickplay] ffmpeg invoke (hwaccel={Hwaccel}, preset={Preset}, crf={Crf}, width={Width}, interval={Interval}s, sourceHdr={IsHdr}, source10bit={Is10Bit})",
             hwaccelArgs.Count > 0 ? string.Join(' ', hwaccelArgs) : "none",
-            cfg.IframePreset, cfg.IframeCrf, cfg.IframeWidth, cfg.IframeIntervalSeconds, isHdrSource);
+            cfg.IframePreset, cfg.IframeCrf, cfg.IframeWidth, cfg.IframeIntervalSeconds, isHdrSource, is10BitSource);
         _logger.LogDebug(
             "[NativeTrickplay] ffmpeg cmd: {Encoder} {Args}",
             _encoder.EncoderPath, string.Join(' ', primaryArgs));
@@ -608,9 +608,11 @@ public sealed class IframeAssetCache
             when (hwaccelArgs.Count > 0 && IsLikelyHwaccelFailure(ex.Message))
         {
             // Recognizable hwaccel handoff failure (e.g. QSV+HEVC EBUSY,
-            // VAAPI auto_scale gap, "Failed to transfer data to output frame").
-            // Retry once with software decode — ffmpeg can always handle the
-            // source if the GPU path is misbehaving for this specific codec.
+            // VAAPI auto_scale gap, "Failed to transfer data to output frame",
+            // "Invalid output format … for hwframe download" when a wrong
+            // bit-depth was probed). Retry once with software decode —
+            // ffmpeg can always handle the source if the GPU path is
+            // misbehaving for this specific codec.
             _logger.LogWarning(
                 "[NativeTrickplay] hwaccel decode failed for {Input}, retrying with software decode.\nffmpeg stderr:\n{Stderr}",
                 inputPath,
@@ -618,18 +620,27 @@ public sealed class IframeAssetCache
         }
 
         await RunProcessAsync(_encoder.EncoderPath,
-            BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs: null, isHdrSource), ct).ConfigureAwait(false);
+            BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs: null, isHdrSource, is10BitSource), ct).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Quick HDR detection from the source file's container metadata. Uses
-    /// ffprobe to read the first video stream's color_transfer; values like
-    /// `smpte2084` (PQ) or `arib-std-b67` (HLG) signal HDR. Falls back to false
-    /// (treat as SDR) on any error — branching to the SDR encoder path for an
-    /// HDR source would just produce slightly-washed-out thumbnails, but
-    /// branching to HDR for SDR fails with zscale "no path between colorspaces".
+    /// Container-metadata probe used by the encoder. Returns:
+    /// <list type="bullet">
+    /// <item>IsHdr — true for PQ (smpte2084) or HLG (arib-std-b67).</item>
+    /// <item>Is10Bit — true if the source decodes to 10-bit frames.
+    /// Drives hwdownload's target sw_format: 8-bit codecs decode into
+    /// nv12, 10-bit into p010le. Picking the wrong one triggers
+    /// "Invalid output format … for hwframe download" and aborts the
+    /// entire filter graph (ffmpeg picks the first sw_format from any
+    /// alternation, then errors hard if the device's valid_sw_formats
+    /// list doesn't include it — alternation `nv12|p010le` does NOT
+    /// auto-fall-back to p010le on 10-bit source, despite intuition).</item>
+    /// </list>
+    /// On any probe failure: treat as SDR + 8-bit. SDR-on-HDR mis-tag just
+    /// produces washed-out thumbnails (acceptable); 8-bit-on-10-bit
+    /// hwdownload is recoverable via the software-decode fallback.
     /// </summary>
-    private bool DetectHdrFromPath(string inputPath)
+    private (bool IsHdr, bool Is10Bit) ProbeSourceVideo(string inputPath)
     {
         try
         {
@@ -640,8 +651,8 @@ public sealed class IframeAssetCache
                 {
                     "-v", "error",
                     "-select_streams", "v:0",
-                    "-show_entries", "stream=color_transfer",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    "-show_entries", "stream=color_transfer,bits_per_raw_sample,pix_fmt",
+                    "-of", "default=noprint_wrappers=1",
                     inputPath,
                 },
                 RedirectStandardOutput = true,
@@ -650,24 +661,47 @@ public sealed class IframeAssetCache
                 CreateNoWindow = true,
             };
             using var proc = System.Diagnostics.Process.Start(psi);
-            if (proc is null) return false;
+            if (proc is null) return (false, false);
             if (!proc.WaitForExit(3000))
             {
                 proc.Kill(entireProcessTree: true);
-                return false;
+                return (false, false);
             }
-            var transfer = proc.StandardOutput.ReadToEnd().Trim().ToLowerInvariant();
-            return transfer is "smpte2084" or "arib-std-b67";
+            var output = proc.StandardOutput.ReadToEnd().ToLowerInvariant();
+            string Get(string key)
+            {
+                foreach (var raw in output.Split('\n'))
+                {
+                    var line = raw.Trim();
+                    var prefix = key + "=";
+                    if (line.StartsWith(prefix, StringComparison.Ordinal))
+                        return line[prefix.Length..].Trim();
+                }
+                return string.Empty;
+            }
+            var transfer = Get("color_transfer");
+            var bitsRaw = Get("bits_per_raw_sample");
+            var pixFmt = Get("pix_fmt");
+            var isHdr = transfer is "smpte2084" or "arib-std-b67";
+            // bits_per_raw_sample may be N/A for some sources; fall back to
+            // pix_fmt heuristic. Common 10-bit pixel formats include
+            // yuv420p10le, p010le, yuv444p10le, yuv422p10le, etc.
+            var is10Bit =
+                bitsRaw == "10" ||
+                pixFmt.Contains("p10", StringComparison.Ordinal) ||
+                pixFmt.Contains("10le", StringComparison.Ordinal) ||
+                pixFmt.Contains("10be", StringComparison.Ordinal);
+            return (isHdr, is10Bit);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "[NativeTrickplay] HDR detection failed for {Path}, treating as SDR", inputPath);
-            return false;
+            _logger.LogDebug(ex, "[NativeTrickplay] source probe failed for {Path}, defaulting to SDR/8-bit", inputPath);
+            return (false, false);
         }
     }
 
     private static List<string> BuildFfmpegArgs(
-        PluginConfiguration cfg, string inputPath, string outputPath, IframeVariant variant, IReadOnlyList<string>? hwaccelArgs, bool isHdrSource)
+        PluginConfiguration cfg, string inputPath, string outputPath, IframeVariant variant, IReadOnlyList<string>? hwaccelArgs, bool isHdrSource, bool is10BitSource)
     {
         var args = new List<string>(48)
         {
@@ -686,19 +720,25 @@ public sealed class IframeAssetCache
         //   "Impossible to convert between the formats supported by the
         //    filter 'Parsed_fps_0' and the filter 'auto_scale_0'"
         //
-        // Fix: explicitly download GPU frames to CPU memory at the START
-        // of the filter chain via `hwdownload,format=nv12|p010le`. The
-        // alternation accepts either 8-bit (nv12) or 10-bit (p010le)
-        // hardware output formats so we don't lose source bit depth before
-        // tonemap. Skip for VideoToolbox where bare `-hwaccel` already
-        // produces CPU frames — adding hwdownload there would fail because
-        // there's nothing on the GPU side to download.
+        // Fix: explicitly download GPU frames to CPU memory via
+        // `hwdownload,format=<sw_format>` at the start of the filter chain.
+        // <sw_format> MUST match the hwframe's actual sw_format — using an
+        // alternation `nv12|p010le` does NOT auto-fall-back: ffmpeg picks
+        // the first option, and if it isn't in the device's
+        // valid_sw_formats list, the entire filter graph aborts with
+        // "Invalid output format … for hwframe download". So we probe the
+        // source bit depth in advance: 8-bit codec → nv12, 10-bit → p010le.
+        //
+        // Skip for VideoToolbox: bare `-hwaccel` already auto-transfers to
+        // CPU frames, so prepending hwdownload there would fail (there's
+        // nothing on the GPU side to download).
         var needsHwdownload = hwaccelArgs is { Count: > 0 } && (
             hwaccelArgs.Contains("qsv") ||
             hwaccelArgs.Contains("vaapi") ||
             hwaccelArgs.Contains("cuda") ||
             hwaccelArgs.Contains("d3d11va"));
-        var hwdownloadPrefix = needsHwdownload ? "hwdownload,format=nv12|p010le," : string.Empty;
+        var hwSwFormat = is10BitSource ? "p010le" : "nv12";
+        var hwdownloadPrefix = needsHwdownload ? $"hwdownload,format={hwSwFormat}," : string.Empty;
 
         var width = cfg.IframeWidth.ToString(CultureInfo.InvariantCulture);
         var interval = cfg.IframeIntervalSeconds <= 0 ? 1.0 : cfg.IframeIntervalSeconds;
@@ -812,7 +852,16 @@ public sealed class IframeAssetCache
             || stderr.Contains("Impossible to convert between the formats", StringComparison.Ordinal)
             || stderr.Contains("Cannot use AVHWFramesContext", StringComparison.Ordinal)
             || stderr.Contains("Unsupported or mismatching pixel format", StringComparison.Ordinal)
-            || stderr.Contains("hwaccel", StringComparison.OrdinalIgnoreCase);
+            // hwdownload-side negotiation failures: occur when the probed
+            // sw_format (nv12 vs p010le) doesn't match the hwframe ctx's
+            // actual sw_format. Catches mis-probed bit depths.
+            || stderr.Contains("Invalid output format", StringComparison.Ordinal)
+            || stderr.Contains("hwframe download", StringComparison.Ordinal)
+            || stderr.Contains("Failed to configure output pad", StringComparison.Ordinal)
+            // Generic hwaccel keyword fallback — catches any pattern the
+            // explicit list above misses.
+            || stderr.Contains("hwaccel", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("hwframe", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string FirstLine(string s)
