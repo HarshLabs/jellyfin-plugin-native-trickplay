@@ -1,1 +1,20 @@
-[]
+[
+    {
+        "guid": "6911edf0-840d-4a71-965d-1319cbb2efd1",
+        "name": "Native Trickplay",
+        "description": "Generates HLS I-frame variants so Apple TV / AVPlayer clients get native\nscrubbing thumbnails on the transport bar \u2014 no client-side overlay needed.\nOne-time ffmpeg cost per item, then cached.\nIncludes a configurable daily prune scheduled task (orphan removal,\nage-based eviction, optional LRU size cap) so the cache doesn't grow\nunbounded.\n",
+        "overview": "Native HLS trickplay for AVPlayer-based clients (Apple TV).",
+        "owner": "harshlabsllc",
+        "category": "General",
+        "versions": [
+            {
+                "version": "1.0.0.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.0.0/native-trickplay_1.0.0.0.zip",
+                "checksum": "bf36e7aad3964defb1d77d60a04a4cb4",
+                "timestamp": "2026-04-25T04:25:31Z"
+            }
+        ]
+    }
+]
