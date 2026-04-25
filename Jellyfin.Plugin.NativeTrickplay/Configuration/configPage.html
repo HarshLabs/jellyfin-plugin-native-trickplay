@@ -681,6 +681,14 @@
                             <input id="MaxConcurrentGenerations" type="number" class="ntp-input" min="1" max="8" />
                         </div>
 
+                        <div class="ntp-form-row toggle">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Resume interrupted encodes</span>
+                                <span class="ntp-label-help">After Jellyfin starts, scan the cache for items whose previous encode was killed (plugin upgrade, crash, power loss) and re-queue them automatically — 30 seconds after boot, in the background. Disable if you'd rather restart Jellyfin to abort a runaway bulk encode.</span>
+                            </div>
+                            <label class="ntp-toggle"><input id="ResumeInterruptedEncodesOnStartup" type="checkbox" /><span class="ntp-toggle-slider"></span></label>
+                        </div>
+
                         <div class="ntp-form-row">
                             <div class="ntp-label">
                                 <span class="ntp-label-name">Cache directory</span>
@@ -833,6 +841,7 @@
                 document.querySelector('#IframeCrf').value = cfg.IframeCrf;
                 document.querySelector('#IframeIntervalSeconds').value = cfg.IframeIntervalSeconds;
                 document.querySelector('#MaxConcurrentGenerations').value = cfg.MaxConcurrentGenerations;
+                document.querySelector('#ResumeInterruptedEncodesOnStartup').checked = cfg.ResumeInterruptedEncodesOnStartup !== false;
                 document.querySelector('#UseHardwareDecoding').checked = cfg.UseHardwareDecoding;
                 document.querySelector('#CacheDirectory').value = cfg.CacheDirectory || '';
                 document.querySelector('#PruneOrphans').checked = cfg.PruneOrphans;
@@ -854,6 +863,7 @@
                 cfg.IframeCrf = parseInt(document.querySelector('#IframeCrf').value, 10);
                 cfg.IframeIntervalSeconds = parseFloat(document.querySelector('#IframeIntervalSeconds').value);
                 cfg.MaxConcurrentGenerations = Math.max(1, Math.min(8, parseInt(document.querySelector('#MaxConcurrentGenerations').value, 10) || 1));
+                cfg.ResumeInterruptedEncodesOnStartup = document.querySelector('#ResumeInterruptedEncodesOnStartup').checked;
                 cfg.UseHardwareDecoding = document.querySelector('#UseHardwareDecoding').checked;
                 cfg.CacheDirectory = (document.querySelector('#CacheDirectory').value || '').trim();
                 cfg.PruneOrphans = document.querySelector('#PruneOrphans').checked;

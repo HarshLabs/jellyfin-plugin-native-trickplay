@@ -51,6 +51,18 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool PruneOrphans { get; set; } = true;
     public int MaxAgeDays { get; set; } = 90;             // 0 = disabled
     public int MaxCacheGigabytes { get; set; } = 0;        // 0 = disabled (no size cap)
+
+    /// <summary>
+    /// When true (default), the plugin scans the cache root on startup
+    /// and re-queues any item whose previous encode was interrupted —
+    /// detected by a half-written `iframe.m4s.tmp` file with no valid
+    /// `.source-mtime` stamp alongside it. This recovers automatically
+    /// from plugin upgrades, Jellyfin crashes, or power failures
+    /// without the user having to manually trigger a re-encode.
+    /// Disable if you'd rather restart Jellyfin to abort a runaway
+    /// bulk encode and have those items stay un-encoded.
+    /// </summary>
+    public bool ResumeInterruptedEncodesOnStartup { get; set; } = true;
 }
 
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
@@ -94,6 +106,10 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         // Pre-warms the cache when playback starts so the user's first scrub is
         // served from disk instead of blocking on a 10-30s ffmpeg encode.
         serviceCollection.AddHostedService<PlaybackWarmupService>();
+        // Detects encodes that were interrupted by a previous shutdown
+        // (plugin upgrade, crash, power loss) and re-queues them 30s after
+        // boot so the cache self-heals without manual intervention.
+        serviceCollection.AddHostedService<StartupResumeService>();
         serviceCollection.PostConfigure<MvcOptions>(opts =>
         {
             opts.Filters.AddService<MasterPlaylistInjector>();
