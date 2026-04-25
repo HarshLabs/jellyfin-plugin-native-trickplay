@@ -687,10 +687,7 @@
 
                     <div class="ntp-input-group">
                         <label class="ntp-input-label" for="ntpSearch">Search</label>
-                        <div class="ntp-search-row">
-                            <input id="ntpSearch" class="ntp-input" type="text" placeholder="Title or series…" />
-                            <button id="ntpSearchBtn" type="button" class="ntp-btn ntp-btn-primary">Search</button>
-                        </div>
+                        <input id="ntpSearch" class="ntp-input" type="text" placeholder="Title or series — results update as you type" />
                         <p class="ntp-hint">
                             Tokens are AND-matched; matching is case + accent insensitive. Try
                             <code>elementary S6E18</code>, <code>elementary S7</code>,
@@ -1144,10 +1141,9 @@
 
         // ── Wire up all UI events ─────────────────────────────────────────
         document.querySelector('#ntpRefreshStatusBtn').addEventListener('click', ntpRefreshStatus);
-        document.querySelector('#ntpSearchBtn').addEventListener('click', function (e) { ntpRunSearch(e.currentTarget); });
 
-        // Debounced live search: re-run search 280ms after the user
-        // stops typing. Enter still fires immediately.
+        // Debounced live search: re-run 280ms after typing stops.
+        // Enter fires immediately and cancels any pending debounce.
         var ntpSearchDebounce = null;
         document.querySelector('#ntpSearch').addEventListener('input', function () {
             if (ntpSearchDebounce) clearTimeout(ntpSearchDebounce);
@@ -1196,15 +1192,6 @@
                 ntpToast('Library queue failed' + (err && err.message ? ': ' + err.message : ''), 'error');
             });
         });
-
-        // Update the modify the existing ntpRunSearch to also accept an
-        // optional button to show a busy state on. (Keep the no-arg
-        // signature for backward compatibility with existing callers.)
-        var _ntpRunSearchOrig = ntpRunSearch;
-        ntpRunSearch = function (btn) {
-            if (btn) return ntpWithBusy(btn, function () { return _ntpRunSearchOrig(); });
-            return _ntpRunSearchOrig();
-        };
     </script>
 </div>
 </body>
