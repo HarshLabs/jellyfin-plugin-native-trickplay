@@ -138,17 +138,88 @@
     }
     #NativeTrickplayConfigPage .ntp-hint { font-size: 0.85em; opacity: 0.6; margin: 0.5em 0 0; line-height: 1.5; }
 
+    /* ── Unified input + select styling ─────────────────────────────
+       Single visual treatment for all text/number inputs and selects
+       across the page so the Find & select section matches the
+       Generation/Pruning rows. Replaces emby-input / emby-select on
+       our markup so we own every property; theme follows the plugin
+       page's colors via the var() fallback chain. */
+    #NativeTrickplayConfigPage .ntp-input,
+    #NativeTrickplayConfigPage .ntp-select {
+        width: 100%;
+        box-sizing: border-box;
+        background: rgba(127,127,127,0.08);
+        border: 1px solid rgba(127,127,127,0.22);
+        border-radius: 8px;
+        padding: 0.7em 0.9em;
+        color: inherit;
+        font: inherit;
+        font-size: 0.95em;
+        line-height: 1.3;
+        min-height: 44px;
+        transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+    }
+    #NativeTrickplayConfigPage .ntp-input:hover:not(:focus),
+    #NativeTrickplayConfigPage .ntp-select:hover:not(:focus) {
+        border-color: rgba(127,127,127,0.36);
+    }
+    #NativeTrickplayConfigPage .ntp-input:focus,
+    #NativeTrickplayConfigPage .ntp-select:focus {
+        outline: none;
+        border-color: rgba(10, 132, 255, 0.55);
+        background: rgba(127,127,127,0.14);
+        box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.18);
+    }
+    #NativeTrickplayConfigPage .ntp-input::placeholder { opacity: 0.5; }
+
     /* Custom chevron on selects so they read as dropdowns instead of
-       looking like static label rows. Uses an inline SVG so the
-       chevron color follows the theme via currentColor (encoded). */
-    #NativeTrickplayConfigPage select.ntp-select {
+       looking like static label rows. Inline SVG so the chevron color
+       picks up the theme; padding-right reserves space for it. */
+    #NativeTrickplayConfigPage .ntp-select {
         appearance: none; -webkit-appearance: none; -moz-appearance: none;
-        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='none' stroke='%23999' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");
         background-repeat: no-repeat;
-        background-position: right 0.85em center;
+        background-position: right 0.95em center;
         background-size: 12px 8px;
-        padding-right: 2.4em;
+        padding-right: 2.6em;
         cursor: pointer;
+    }
+    /* Match the selected item color to the surrounding input fill so
+       the dropdown menu doesn't suddenly switch to a stark white
+       contrast on dark themes. */
+    #NativeTrickplayConfigPage .ntp-select option { color: black; }
+
+    /* ── Apple-style round selection checkbox ───────────────────────
+       For multi-select contexts (Select all visible, per-row table
+       items). Toggles are reserved for boolean settings; selection
+       semantics deserve a checkbox shape. Animates from empty circle
+       to filled blue circle with a centered checkmark on check. */
+    #NativeTrickplayConfigPage .ntp-checkbox {
+        appearance: none; -webkit-appearance: none; -moz-appearance: none;
+        width: 22px; height: 22px;
+        flex: 0 0 auto;
+        margin: 0;
+        border: 1.5px solid rgba(127,127,127,0.5);
+        border-radius: 50%;
+        background: transparent;
+        cursor: pointer;
+        position: relative;
+        vertical-align: middle;
+        transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+    }
+    #NativeTrickplayConfigPage .ntp-checkbox:hover { border-color: rgba(127,127,127,0.75); }
+    #NativeTrickplayConfigPage .ntp-checkbox:checked {
+        background: #0a84ff;
+        border-color: #0a84ff;
+    }
+    #NativeTrickplayConfigPage .ntp-checkbox:checked::after {
+        content: "";
+        position: absolute; inset: 0;
+        background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' d='M4 8.5l3 3 5-6'/></svg>") no-repeat center / 14px;
+    }
+    #NativeTrickplayConfigPage .ntp-checkbox:focus-visible {
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.3);
     }
 
     /* Results toolbar visually attached to the table */
@@ -379,7 +450,7 @@
                                 <span class="ntp-label-name">Thumbnail height</span>
                                 <span class="ntp-label-help">Pixels — width is auto-scaled to the source's aspect ratio.</span>
                             </div>
-                            <input id="IframeWidth" type="number" is="emby-input" min="160" max="1920" />
+                            <input id="IframeWidth" type="number" class="ntp-input" min="160" max="1920" />
                         </div>
 
                         <div class="ntp-form-row">
@@ -387,7 +458,7 @@
                                 <span class="ntp-label-name">Thumbnail interval</span>
                                 <span class="ntp-label-help">Seconds between scrubbing thumbnails. <code>1</code> = smoothest scrubbing; raise to <code>5</code> or <code>10</code> if disk space is tight.</span>
                             </div>
-                            <input id="IframeIntervalSeconds" type="number" is="emby-input" min="1" max="60" step="1" />
+                            <input id="IframeIntervalSeconds" type="number" class="ntp-input" min="1" max="60" step="1" />
                         </div>
 
                         <div class="ntp-form-row">
@@ -395,7 +466,7 @@
                                 <span class="ntp-label-name">Encoder quality (CRF)</span>
                                 <span class="ntp-label-help">Lower number → higher quality, larger files. <code>18</code>–<code>32</code> typical.</span>
                             </div>
-                            <input id="IframeCrf" type="number" is="emby-input" min="18" max="40" />
+                            <input id="IframeCrf" type="number" class="ntp-input" min="18" max="40" />
                         </div>
 
                         <div class="ntp-form-row">
@@ -403,7 +474,7 @@
                                 <span class="ntp-label-name">Cache directory</span>
                                 <span class="ntp-label-help">Absolute path. Leave blank to use Jellyfin's default cache. If you change this, old caches at the previous path are orphaned — delete manually.</span>
                             </div>
-                            <input id="CacheDirectory" type="text" is="emby-input" placeholder="/var/cache/native-trickplay" />
+                            <input id="CacheDirectory" type="text" class="ntp-input" placeholder="/var/cache/native-trickplay" />
                         </div>
                     </div>
 
@@ -426,7 +497,7 @@
                                 <span class="ntp-label-name">Age-based eviction</span>
                                 <span class="ntp-label-help">Delete entries unaccessed for more than N days. <code>0</code> disables.</span>
                             </div>
-                            <input id="MaxAgeDays" type="number" is="emby-input" min="0" max="3650" />
+                            <input id="MaxAgeDays" type="number" class="ntp-input" min="0" max="3650" />
                         </div>
 
                         <div class="ntp-form-row">
@@ -434,7 +505,7 @@
                                 <span class="ntp-label-name">Total size cap</span>
                                 <span class="ntp-label-help">Keep total cache below N GB by LRU eviction. <code>0</code> disables.</span>
                             </div>
-                            <input id="MaxCacheGigabytes" type="number" is="emby-input" min="0" max="10240" />
+                            <input id="MaxCacheGigabytes" type="number" class="ntp-input" min="0" max="10240" />
                         </div>
                     </div>
 
@@ -486,7 +557,7 @@
                     <div class="ntp-input-group">
                         <label class="ntp-input-label" for="ntpSearch">Search</label>
                         <div class="ntp-search-row">
-                            <input id="ntpSearch" is="emby-input" type="text" placeholder="Title or series…" />
+                            <input id="ntpSearch" class="ntp-input" type="text" placeholder="Title or series…" />
                             <button id="ntpSearchBtn" type="button" class="ntp-btn ntp-btn-primary">Search</button>
                         </div>
                         <p class="ntp-hint">
@@ -524,7 +595,7 @@
                     <div class="ntp-results-card">
                         <div class="ntp-results-toolbar">
                             <label>
-                                <input type="checkbox" id="ntpSelectAll" />
+                                <input type="checkbox" class="ntp-checkbox" id="ntpSelectAll" />
                                 <span>Select all visible</span>
                             </label>
                             <span id="ntpResultsMeta" class="ntp-results-meta"></span>
@@ -714,7 +785,7 @@
                         ? '<span class="ntp-badge ntp-badge-cached">✓ ' + ntpFmtBytes(it.CacheSizeBytes) + '</span>'
                         : '<span class="ntp-badge ntp-badge-uncached">— not cached</span>';
                     return '<tr data-item-id="' + it.Id + '">' +
-                        '<td><input type="checkbox" class="ntpItemCheck" value="' + it.Id + '" /></td>' +
+                        '<td><input type="checkbox" class="ntpItemCheck ntp-checkbox" value="' + it.Id + '" /></td>' +
                         '<td>' + title + '</td>' +
                         '<td>' + status + '</td>' +
                         '<td class="ntp-actions-cell">' +
