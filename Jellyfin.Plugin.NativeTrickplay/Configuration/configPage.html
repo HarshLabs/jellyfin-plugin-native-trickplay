@@ -31,6 +31,12 @@
                     <label class="inputLabel" for="IframeCrf">CRF (encoder quality, lower=better; 18-32 typical)</label>
                     <input id="IframeCrf" type="number" is="emby-input" min="18" max="40" />
                 </div>
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="UseHardwareDecoding" type="checkbox" is="emby-checkbox" />
+                        <span>Use hardware acceleration for decode (follows Dashboard → Playback → Transcoding setting)</span>
+                    </label>
+                </div>
 
                 <div class="verticalSection">
                     <h3>Cache pruning</h3>
@@ -66,6 +72,7 @@
                 document.querySelector('#Enabled').checked = cfg.Enabled;
                 document.querySelector('#IframeWidth').value = cfg.IframeWidth;
                 document.querySelector('#IframeCrf').value = cfg.IframeCrf;
+                document.querySelector('#UseHardwareDecoding').checked = cfg.UseHardwareDecoding;
                 document.querySelector('#PruneOrphans').checked = cfg.PruneOrphans;
                 document.querySelector('#MaxAgeDays').value = cfg.MaxAgeDays;
                 document.querySelector('#MaxCacheGigabytes').value = cfg.MaxCacheGigabytes;
@@ -77,6 +84,7 @@
                 cfg.Enabled = document.querySelector('#Enabled').checked;
                 cfg.IframeWidth = parseInt(document.querySelector('#IframeWidth').value, 10);
                 cfg.IframeCrf = parseInt(document.querySelector('#IframeCrf').value, 10);
+                cfg.UseHardwareDecoding = document.querySelector('#UseHardwareDecoding').checked;
                 cfg.PruneOrphans = document.querySelector('#PruneOrphans').checked;
                 cfg.MaxAgeDays = parseInt(document.querySelector('#MaxAgeDays').value, 10);
                 cfg.MaxCacheGigabytes = parseInt(document.querySelector('#MaxCacheGigabytes').value, 10);

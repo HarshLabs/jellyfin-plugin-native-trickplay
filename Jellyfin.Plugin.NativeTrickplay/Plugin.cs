@@ -21,6 +21,14 @@ public class PluginConfiguration : BasePluginConfiguration
     public int IframeCrf { get; set; } = 32;
     public string IframePreset { get; set; } = "ultrafast";
     public int MaxConcurrentGenerations { get; set; } = 1;
+    /// <summary>
+    /// When true, follows Jellyfin's global "Hardware Acceleration" setting
+    /// (Dashboard → Playback → Transcoding) and adds the appropriate
+    /// -hwaccel flag to the ffmpeg invocation. Big speedup for HEVC/HDR
+    /// source decode; encoding stays on CPU (libx264) because hardware
+    /// H.264 encoders don't support keyint=1 reliably.
+    /// </summary>
+    public bool UseHardwareDecoding { get; set; } = true;
 
     // Pruner knobs (used by PruneTrickplayCacheTask)
     public bool PruneOrphans { get; set; } = true;

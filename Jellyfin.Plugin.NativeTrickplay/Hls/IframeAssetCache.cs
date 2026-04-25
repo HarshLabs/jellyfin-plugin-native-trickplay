@@ -7,9 +7,12 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -25,6 +28,7 @@ public sealed class IframeAssetCache
     private readonly IApplicationPaths _paths;
     private readonly ILibraryManager _libraryManager;
     private readonly IMediaEncoder _encoder;
+    private readonly IServerConfigurationManager _serverConfig;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ConcurrentDictionary<string, Lazy<Task<IframeAsset>>> _inflight = new();
     private readonly SemaphoreSlim _globalLimit;
@@ -34,12 +38,14 @@ public sealed class IframeAssetCache
         IApplicationPaths paths,
         ILibraryManager libraryManager,
         IMediaEncoder encoder,
+        IServerConfigurationManager serverConfig,
         IHostApplicationLifetime lifetime)
     {
         _logger = logger;
         _paths = paths;
         _libraryManager = libraryManager;
         _encoder = encoder;
+        _serverConfig = serverConfig;
         _lifetime = lifetime;
         var max = Plugin.Instance?.Configuration.MaxConcurrentGenerations ?? 1;
         _globalLimit = new SemaphoreSlim(Math.Max(1, max));
@@ -220,9 +226,19 @@ public sealed class IframeAssetCache
     private async Task RunFfmpegAsync(string inputPath, string outputPath, CancellationToken ct)
     {
         var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
-        var args = new[]
+        var args = new List<string>(32)
         {
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+        };
+
+        // Hardware decode args go BEFORE -i. For VAAPI / QSV / VideoToolbox / CUDA the
+        // hardware-decoded frames are auto-copied back to system memory by ffmpeg when
+        // they enter a CPU filter chain (our scale + format conversion), so libx264
+        // can encode them. No explicit hwdownload needed for our case.
+        AppendHwaccelArgs(cfg, args);
+
+        args.AddRange(new[]
+        {
             "-skip_frame", "nokey",
             "-i", inputPath,
             "-an", "-sn",
@@ -235,9 +251,78 @@ public sealed class IframeAssetCache
             "-x264-params", "keyint=1:scenecut=0:open-gop=0",
             "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
             "-f", "mp4", outputPath
-        };
+        });
 
         await RunProcessAsync(_encoder.EncoderPath, args, ct).ConfigureAwait(false);
+    }
+
+    private void AppendHwaccelArgs(PluginConfiguration cfg, List<string> args)
+    {
+        if (!cfg.UseHardwareDecoding) return;
+
+        EncodingOptions opts;
+        try { opts = _serverConfig.GetEncodingOptions(); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[NativeTrickplay] could not read EncodingOptions, falling back to software decode");
+            return;
+        }
+
+        // Map Jellyfin's HardwareAccelerationType enum to the corresponding ffmpeg
+        // -hwaccel decoder. NVENC/AMF are encoder names, not decoders — for those
+        // we map to the matching decode-side hwaccel that the same GPU exposes.
+        switch (opts.HardwareAccelerationType)
+        {
+            case HardwareAccelerationType.videotoolbox:
+                args.Add("-hwaccel"); args.Add("videotoolbox");
+                break;
+            case HardwareAccelerationType.qsv:
+                args.Add("-hwaccel"); args.Add("qsv");
+                if (!string.IsNullOrEmpty(opts.QsvDevice))
+                {
+                    args.Add("-qsv_device"); args.Add(opts.QsvDevice);
+                }
+                break;
+            case HardwareAccelerationType.vaapi:
+                args.Add("-hwaccel"); args.Add("vaapi");
+                if (!string.IsNullOrEmpty(opts.VaapiDevice))
+                {
+                    args.Add("-vaapi_device"); args.Add(opts.VaapiDevice);
+                }
+                break;
+            case HardwareAccelerationType.nvenc:
+                // NVENC is the NVIDIA encoder; the matching decode hwaccel is `cuda`.
+                args.Add("-hwaccel"); args.Add("cuda");
+                break;
+            case HardwareAccelerationType.amf:
+                // AMF is AMD's encode framework; AMD decode in ffmpeg is platform-specific:
+                // d3d11va on Windows, vaapi on Linux (via Mesa's amdgpu driver).
+                if (OperatingSystem.IsWindows())
+                {
+                    args.Add("-hwaccel"); args.Add("d3d11va");
+                }
+                else if (OperatingSystem.IsLinux())
+                {
+                    args.Add("-hwaccel"); args.Add("vaapi");
+                    if (!string.IsNullOrEmpty(opts.VaapiDevice))
+                    {
+                        args.Add("-vaapi_device"); args.Add(opts.VaapiDevice);
+                    }
+                }
+                // macOS doesn't host AMD-specific hwaccel; fall through to software.
+                break;
+            case HardwareAccelerationType.v4l2m2m:
+                // Used on embedded ARM Linux boards (Raspberry Pi, etc.). The DRM hwaccel
+                // is the standard pipeline.
+                args.Add("-hwaccel"); args.Add("drm");
+                break;
+            case HardwareAccelerationType.rkmpp:
+                args.Add("-hwaccel"); args.Add("rkmpp");
+                break;
+            case HardwareAccelerationType.none:
+            default:
+                break;
+        }
     }
 
     private async Task<IReadOnlyList<double>> ProbePtsDeltasAsync(string filePath, int expectedCount, CancellationToken ct)
