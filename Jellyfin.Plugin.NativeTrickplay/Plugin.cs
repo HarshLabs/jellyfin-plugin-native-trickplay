@@ -62,6 +62,9 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IframeAssetCache>();
         serviceCollection.AddSingleton<MasterPlaylistInjector>();
         serviceCollection.AddSingleton<IScheduledTask, PruneTrickplayCacheTask>();
+        // Pre-warms the cache when playback starts so the user's first scrub is
+        // served from disk instead of blocking on a 10-30s ffmpeg encode.
+        serviceCollection.AddHostedService<PlaybackWarmupService>();
         serviceCollection.PostConfigure<MvcOptions>(opts =>
         {
             opts.Filters.AddService<MasterPlaylistInjector>();

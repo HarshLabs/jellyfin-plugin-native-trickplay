@@ -1,6 +1,5 @@
 using System;
-using System.IO;
-using System.Threading.Tasks;
+using System.Globalization;
 using Jellyfin.Plugin.NativeTrickplay.Hls;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -16,6 +15,10 @@ namespace Jellyfin.Plugin.NativeTrickplay.Api;
 [Route("")]
 public sealed class IframeHlsController : ControllerBase
 {
+    // How long to ask the client to wait before retrying when generation is in flight.
+    // Roughly the worst-case generation time for a long episode at default settings.
+    private const int RetryAfterSeconds = 15;
+
     private readonly IframeAssetCache _cache;
     private readonly ILibraryManager _libraryManager;
     private readonly ILogger<IframeHlsController> _logger;
@@ -29,7 +32,7 @@ public sealed class IframeHlsController : ControllerBase
 
     [HttpGet("Videos/{itemId:guid}/iframe.m3u8")]
     [Produces("application/vnd.apple.mpegurl")]
-    public async Task<IActionResult> GetPlaylist([FromRoute] Guid itemId)
+    public IActionResult GetPlaylist([FromRoute] Guid itemId)
     {
         if (Plugin.Instance is null || !Plugin.Instance.Configuration.Enabled)
         {
@@ -40,53 +43,45 @@ public sealed class IframeHlsController : ControllerBase
             return NotFound();
         }
 
-        IframeAsset asset;
-        try
+        var cached = _cache.TryGetCached(itemId);
+        if (cached is not null)
         {
-            asset = await _cache.GetOrCreateAsync(itemId, HttpContext.RequestAborted).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to generate iframe asset for {ItemId}", itemId);
-            return StatusCode(500);
+            var auth = BuildAuthSuffix(Request);
+            var body = cached.PlaylistTemplate.Replace("{AUTH}", auth, StringComparison.Ordinal);
+            return Content(body, "application/vnd.apple.mpegurl");
         }
 
-        var auth = BuildAuthSuffix(Request);
-        var body = asset.PlaylistTemplate.Replace("{AUTH}", auth, StringComparison.Ordinal);
-        return Content(body, "application/vnd.apple.mpegurl");
+        // Not yet cached. Kick off generation in the background and tell the client
+        // to retry. Using 503 + Retry-After (per HTTP spec) lets AVPlayer politely
+        // come back later instead of giving up on the I-frame variant for the
+        // entire playback session.
+        _cache.Warmup(itemId);
+        Response.Headers.RetryAfter = RetryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+        return StatusCode(StatusCodes.Status503ServiceUnavailable);
     }
 
     [HttpGet("Videos/{itemId:guid}/iframe.m4s")]
-    public async Task<IActionResult> GetSegment([FromRoute] Guid itemId)
+    public IActionResult GetSegment([FromRoute] Guid itemId)
     {
         if (Plugin.Instance is null || !Plugin.Instance.Configuration.Enabled)
         {
             return NotFound();
         }
 
-        IframeAsset asset;
-        try
+        var cached = _cache.TryGetCached(itemId);
+        if (cached is null)
         {
-            asset = await _cache.GetOrCreateAsync(itemId, HttpContext.RequestAborted).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to fetch iframe segment for {ItemId}", itemId);
-            return StatusCode(500);
-        }
-
-        if (!System.IO.File.Exists(asset.SegmentPath))
-        {
+            // Segment requested before playlist is cached — almost always means the
+            // client is looking for a now-evicted asset. Don't trigger generation
+            // here (only the playlist endpoint should), just 404.
             return NotFound();
         }
-        return PhysicalFile(asset.SegmentPath, "video/iso.segment", enableRangeProcessing: true);
+
+        return PhysicalFile(cached.SegmentPath, "video/iso.segment", enableRangeProcessing: true);
     }
 
     private static string BuildAuthSuffix(HttpRequest request)
     {
-        // Forward ApiKey from query if present (AVPlayer cannot set custom headers on segment fetches).
-        // Server side, [Authorize] also accepts the bearer header; clients that supply it on the
-        // playlist request will also supply it on segment fetches via the Authorization header.
         var apiKey = (string?)request.Query["ApiKey"]
                      ?? (string?)request.Query["api_key"];
         return string.IsNullOrEmpty(apiKey) ? string.Empty : "?ApiKey=" + Uri.EscapeDataString(apiKey);
