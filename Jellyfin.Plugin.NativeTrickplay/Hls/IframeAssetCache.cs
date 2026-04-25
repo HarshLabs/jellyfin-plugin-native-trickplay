@@ -295,6 +295,8 @@ public sealed class IframeAssetCache
             return;
         }
 
+        int beforeCount = args.Count;
+
         // Map Jellyfin's HardwareAccelerationType enum to the corresponding ffmpeg
         // -hwaccel decoder. NVENC/AMF are encoder names, not decoders — for those
         // we map to the matching decode-side hwaccel that the same GPU exposes.
@@ -349,6 +351,18 @@ public sealed class IframeAssetCache
             case HardwareAccelerationType.none:
             default:
                 break;
+        }
+
+        // If hwaccel was added, force the decoder to output an NV12 frame in
+        // system memory so the libx264 software encode + scale/format CPU
+        // filter chain can pick it up directly. Without this, VAAPI/QSV/CUDA
+        // hand off GPU surfaces and ffmpeg's auto_scale filter bails with
+        // "Impossible to convert between the formats". VideoToolbox happens
+        // to auto-download to a CPU-readable format already; the explicit
+        // hint is harmless there.
+        if (args.Count > beforeCount)
+        {
+            args.Add("-hwaccel_output_format"); args.Add("nv12");
         }
     }
 
