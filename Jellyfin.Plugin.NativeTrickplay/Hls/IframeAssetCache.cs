@@ -253,6 +253,37 @@ public sealed class IframeAssetCache
     private async Task RunFfmpegAsync(string inputPath, string outputPath, CancellationToken ct)
     {
         var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+
+        // First attempt: with hwaccel if configured.
+        var hwaccelArgs = new List<string>();
+        AppendHwaccelArgs(cfg, hwaccelArgs);
+
+        try
+        {
+            await RunProcessAsync(_encoder.EncoderPath,
+                BuildFfmpegArgs(cfg, inputPath, outputPath, hwaccelArgs), ct).ConfigureAwait(false);
+            return;
+        }
+        catch (InvalidOperationException ex)
+            when (hwaccelArgs.Count > 0 && IsLikelyHwaccelFailure(ex.Message))
+        {
+            // Recognizable hwaccel handoff failure (e.g. QSV+HEVC EBUSY,
+            // VAAPI auto_scale gap, "Failed to transfer data to output frame").
+            // Retry once with software decode — ffmpeg can always handle the
+            // source if the GPU path is misbehaving for this specific codec.
+            _logger.LogWarning(
+                "[NativeTrickplay] hwaccel decode failed for {Input}, retrying with software decode. ffmpeg said: {FirstLine}",
+                inputPath,
+                FirstLine(ex.Message));
+        }
+
+        await RunProcessAsync(_encoder.EncoderPath,
+            BuildFfmpegArgs(cfg, inputPath, outputPath, hwaccelArgs: null), ct).ConfigureAwait(false);
+    }
+
+    private static List<string> BuildFfmpegArgs(
+        PluginConfiguration cfg, string inputPath, string outputPath, IReadOnlyList<string>? hwaccelArgs)
+    {
         var args = new List<string>(32)
         {
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
@@ -262,20 +293,10 @@ public sealed class IframeAssetCache
         // `-hwaccel_output_format`), ffmpeg auto-transfers decoded frames from
         // GPU to system memory in their native CPU pixel format (nv12 for 8-bit,
         // p010 for 10-bit) — the libx264 software encoder + the scale/format
-        // CPU filter chain consume them directly.
-        //
-        // Setting `-hwaccel_output_format nv12` would force a fixed-format GPU→
-        // CPU transfer that fails on 10-bit HEVC sources (Intel QSV and
-        // VideoToolbox both error with "Failed to transfer data to output
-        // frame: -1313558101"). hwdownload is only valid paired with
-        // `-hwaccel_output_format <gpu-format>` because it requires HW frames
-        // as input — without the flag, frames are already CPU-side and
-        // hwdownload errors with "Impossible to convert between formats".
-        //
-        // This pattern mirrors Jellyfin's own GetSwVidFilterChain (its
-        // "copy-back" path for SW-encode-after-HW-decode). See
+        // CPU filter chain consume them directly. This mirrors Jellyfin's own
+        // GetSwVidFilterChain "copy-back" path. See
         // MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs.
-        AppendHwaccelArgs(cfg, args);
+        if (hwaccelArgs is { Count: > 0 }) args.AddRange(hwaccelArgs);
 
         var width = cfg.IframeWidth.ToString(CultureInfo.InvariantCulture);
 
@@ -295,7 +316,32 @@ public sealed class IframeAssetCache
             "-f", "mp4", outputPath
         });
 
-        await RunProcessAsync(_encoder.EncoderPath, args, ct).ConfigureAwait(false);
+        return args;
+    }
+
+    /// <summary>
+    /// Heuristic: does the ffmpeg stderr look like a hwaccel handoff failure
+    /// rather than a genuine source-file or argument problem? When true, the
+    /// software-decode retry is worth attempting; when false, the failure
+    /// would recur and we shouldn't waste another encode pass.
+    /// </summary>
+    private static bool IsLikelyHwaccelFailure(string stderr)
+    {
+        // Specific patterns observed across QSV/VAAPI/CUDA on real-world bug
+        // reports. Cheap substring checks; each one is unambiguous about its
+        // origin in the hwaccel pipeline.
+        return stderr.Contains("Failed to transfer data to output frame", StringComparison.Ordinal)
+            || stderr.Contains("Error synchronizing the operation", StringComparison.Ordinal)
+            || stderr.Contains("Impossible to convert between the formats", StringComparison.Ordinal)
+            || stderr.Contains("Cannot use AVHWFramesContext", StringComparison.Ordinal)
+            || stderr.Contains("Unsupported or mismatching pixel format", StringComparison.Ordinal)
+            || stderr.Contains("hwaccel", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FirstLine(string s)
+    {
+        var idx = s.IndexOf('\n');
+        return idx < 0 ? s : s[..idx];
     }
 
     private void AppendHwaccelArgs(PluginConfiguration cfg, List<string> args)

@@ -99,8 +99,15 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 
             if (isMasterContent)
             {
-                if (bodyText.Contains(IframeMarker, StringComparison.Ordinal))
+                if (bodyText.Contains(IframeMarker, StringComparison.Ordinal)
+                    || IsHdrMaster(bodyText))
                 {
+                    // Either Jellyfin already advertises an I-frame variant, or this
+                    // is HDR/DV content. AVPlayer rejects the entire master playlist
+                    // when an SDR-codec I-frame variant is paired with HDR primary
+                    // variants (Apple HLS authoring spec §4.4.4.x — I-frame variant
+                    // must match the primary's VIDEO-RANGE family). Skipping
+                    // injection costs HDR trickplay but preserves playback.
                     buffer.Position = 0;
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                     return;
@@ -145,6 +152,20 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         {
             http.Response.Body = origBody;
         }
+    }
+
+    /// <summary>
+    /// True if any STREAM-INF in the master declares HDR (PQ/HLG) or carries a
+    /// SUPPLEMENTAL-CODECS attribute (Dolby Vision signaling). When this is the
+    /// case, we don't append an SDR I-frame variant — AVPlayer rejects the whole
+    /// master playlist if the I-frame variant's VIDEO-RANGE doesn't match the
+    /// HDR primary, manifesting as "playback stopped at 0ms".
+    /// </summary>
+    private static bool IsHdrMaster(string master)
+    {
+        return master.Contains("VIDEO-RANGE=PQ", StringComparison.Ordinal)
+            || master.Contains("VIDEO-RANGE=HLG", StringComparison.Ordinal)
+            || master.Contains("SUPPLEMENTAL-CODECS=", StringComparison.Ordinal);
     }
 
     private static bool TryExtractItemId(string path, out Guid itemId)
@@ -193,6 +214,15 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         var audio = streams?.FirstOrDefault(s => s.Type == MediaStreamType.Audio);
 
         if (video is null) return false; // can't safely synthesize without video stream metadata
+
+        // HDR/DV: pass through Jellyfin's media playlist unchanged. We can't
+        // safely emit a synthetic master with an SDR I-frame variant alongside
+        // an HDR primary — AVPlayer rejects the master and playback stops at
+        // 0ms (Kodoku-style failure on DV Profile 8 content).
+        if (video.VideoRangeType is not (VideoRangeType.SDR or VideoRangeType.Unknown))
+        {
+            return false;
+        }
 
         var ci = CultureInfo.InvariantCulture;
 
