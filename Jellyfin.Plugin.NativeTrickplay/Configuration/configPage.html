@@ -602,6 +602,14 @@
 
                         <div class="ntp-form-row">
                             <div class="ntp-label">
+                                <span class="ntp-label-name">Concurrent encodes</span>
+                                <span class="ntp-label-help">How many items to encode in parallel. <code>1</code> is safest; <code>2</code>–<code>4</code> if your CPU and disk can handle it. Higher values can starve other Jellyfin transcodes — watch system load. <em>Requires server restart to take effect.</em></span>
+                            </div>
+                            <input id="MaxConcurrentGenerations" type="number" class="ntp-input" min="1" max="8" />
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
                                 <span class="ntp-label-name">Cache directory</span>
                                 <span class="ntp-label-help">Absolute path. Leave blank to use Jellyfin's default cache. If you change this, old caches at the previous path are orphaned — delete manually.</span>
                             </div>
@@ -749,6 +757,7 @@
                 document.querySelector('#IframeWidth').value = cfg.IframeWidth;
                 document.querySelector('#IframeCrf').value = cfg.IframeCrf;
                 document.querySelector('#IframeIntervalSeconds').value = cfg.IframeIntervalSeconds;
+                document.querySelector('#MaxConcurrentGenerations').value = cfg.MaxConcurrentGenerations;
                 document.querySelector('#UseHardwareDecoding').checked = cfg.UseHardwareDecoding;
                 document.querySelector('#CacheDirectory').value = cfg.CacheDirectory || '';
                 document.querySelector('#PruneOrphans').checked = cfg.PruneOrphans;
@@ -769,6 +778,7 @@
                 cfg.IframeWidth = parseInt(document.querySelector('#IframeWidth').value, 10);
                 cfg.IframeCrf = parseInt(document.querySelector('#IframeCrf').value, 10);
                 cfg.IframeIntervalSeconds = parseFloat(document.querySelector('#IframeIntervalSeconds').value);
+                cfg.MaxConcurrentGenerations = Math.max(1, Math.min(8, parseInt(document.querySelector('#MaxConcurrentGenerations').value, 10) || 1));
                 cfg.UseHardwareDecoding = document.querySelector('#UseHardwareDecoding').checked;
                 cfg.CacheDirectory = (document.querySelector('#CacheDirectory').value || '').trim();
                 cfg.PruneOrphans = document.querySelector('#PruneOrphans').checked;
