@@ -136,11 +136,23 @@ public sealed class IframeAssetCache
         {
             var sourceMtime = File.GetLastWriteTimeUtc(item.Path);
             var stampContent = File.ReadAllText(stampPath);
-            if (!ParseStamp(stampContent, out var stampedMtime, out var stampedEncoder)
-                || stampedMtime != sourceMtime.Ticks)
+            if (!ParseStamp(stampContent, out var stampedMtime, out var stampedEncoder))
+            {
+                // Pre-v1.1.0 stamp files held only the raw mtime number with
+                // no encoder tag suffix. They no longer parse with the
+                // current `<ticks>:<encoder>` format. Surface this distinct
+                // from a real mtime mismatch so users debugging logs can
+                // tell "old plugin version" from "source file changed".
+                _logger.LogInformation(
+                    "[NativeTrickplay] cache invalidated for {ItemId} ({Name}): legacy/corrupt stamp file — will re-encode (raw='{Raw}')",
+                    itemId, item.Name,
+                    stampContent.Length > 60 ? stampContent[..60] + "…" : stampContent);
+                return null;
+            }
+            if (stampedMtime != sourceMtime.Ticks)
             {
                 _logger.LogInformation(
-                    "[NativeTrickplay] cache invalidated for {ItemId} ({Name}): mtime mismatch (stamp={StampMtime} source={SourceMtime})",
+                    "[NativeTrickplay] cache invalidated for {ItemId} ({Name}): source file modified since last encode (stamp={StampMtime} source={SourceMtime})",
                     itemId, item.Name, stampedMtime, sourceMtime.Ticks);
                 return null;
             }
