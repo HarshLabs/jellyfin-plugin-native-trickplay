@@ -63,6 +63,18 @@ public class PluginConfiguration : BasePluginConfiguration
     /// bulk encode and have those items stay un-encoded.
     /// </summary>
     public bool ResumeInterruptedEncodesOnStartup { get; set; } = true;
+
+    /// <summary>
+    /// Seconds to wait after a PlaybackStart event before kicking off the
+    /// iframe encoder. The defer prevents the heavy decode+tonemap ffmpeg
+    /// from racing Jellyfin's stream-copy ffmpeg startup, which manifested
+    /// as -1008 "resource unavailable" stalls on the very first segment
+    /// fetch in earlier versions. 30s is conservative and safe on slow
+    /// disks / NAS deployments; on fast hardware (Apple Silicon, NVMe)
+    /// you can lower it to ~10s for snappier queue feedback. Clamped
+    /// to 5–300s.
+    /// </summary>
+    public int WarmupDelaySeconds { get; set; } = 30;
 }
 
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
