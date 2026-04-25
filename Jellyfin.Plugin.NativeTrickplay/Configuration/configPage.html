@@ -195,7 +195,7 @@
     }
 
     #NativeTrickplayConfigPage .ntp-actions-cell { white-space: nowrap; display: flex; gap: 0.4em; }
-    /* Save settings footer area for the form card */
+    /* Save settings footer area */
     #NativeTrickplayConfigPage .ntp-form-footer {
         display: flex; justify-content: flex-end; align-items: center;
         gap: 0.6em;
@@ -203,6 +203,75 @@
         border-top: 1px solid rgba(127,127,127,0.18);
     }
     #NativeTrickplayConfigPage .ntp-form-footer-help { opacity: 0.55; font-size: 0.85em; margin-right: auto; }
+
+    /* ── iOS-style toggle replacement for emby-checkbox ──────────────
+       The wrapped emby-checkbox doesn't paint reliably here (no visible
+       check state on click). Use a self-contained toggle that's clearly
+       on/off. The hidden <input> still carries the checked state so all
+       JS save/load logic keeps working. */
+    #NativeTrickplayConfigPage .ntp-toggle {
+        position: relative; display: inline-block;
+        width: 50px; height: 30px; flex: 0 0 auto;
+    }
+    #NativeTrickplayConfigPage .ntp-toggle input {
+        position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;
+    }
+    #NativeTrickplayConfigPage .ntp-toggle-slider {
+        position: absolute; inset: 0;
+        background: rgba(127,127,127,0.3);
+        border-radius: 30px;
+        transition: background-color 0.2s ease;
+    }
+    #NativeTrickplayConfigPage .ntp-toggle-slider::before {
+        position: absolute; content: "";
+        height: 26px; width: 26px;
+        left: 2px; top: 2px;
+        background: white;
+        border-radius: 50%;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+        transition: transform 0.2s ease;
+    }
+    #NativeTrickplayConfigPage .ntp-toggle input:checked ~ .ntp-toggle-slider { background: #34c759; }
+    #NativeTrickplayConfigPage .ntp-toggle input:checked ~ .ntp-toggle-slider::before { transform: translateX(20px); }
+    #NativeTrickplayConfigPage .ntp-toggle input:focus-visible ~ .ntp-toggle-slider { box-shadow: 0 0 0 3px rgba(10,132,255,0.4); }
+
+    /* ── Mobile responsiveness ──────────────────────────────────────── */
+    @media (max-width: 700px) {
+        #NativeTrickplayConfigPage .ntp-wrap { padding: 1em 0.75em 3em; }
+        #NativeTrickplayConfigPage .ntp-card { padding: 1.1em; border-radius: 10px; }
+        #NativeTrickplayConfigPage .ntp-hero-title { font-size: 1.4em; }
+        #NativeTrickplayConfigPage .ntp-stat-value { font-size: 1.3em; }
+
+        #NativeTrickplayConfigPage .ntp-card-header { flex-direction: column; align-items: flex-start; gap: 0.2em; }
+        #NativeTrickplayConfigPage .ntp-card-header > .ntp-spacer { display: none; }
+
+        #NativeTrickplayConfigPage .ntp-libcoverage-row {
+            grid-template-columns: 1fr;
+            gap: 0.25em;
+            padding: 0.6em 0;
+            border-bottom: 1px solid rgba(127,127,127,0.1);
+        }
+        #NativeTrickplayConfigPage .ntp-libcoverage-row:last-child { border-bottom: none; }
+        #NativeTrickplayConfigPage .ntp-libcoverage-counts { text-align: left; }
+
+        #NativeTrickplayConfigPage .ntp-form-footer {
+            flex-direction: column-reverse; align-items: stretch;
+        }
+        #NativeTrickplayConfigPage .ntp-form-footer-help { margin-right: 0; text-align: center; }
+        #NativeTrickplayConfigPage .ntp-form-footer .ntp-btn { width: 100%; }
+
+        #NativeTrickplayConfigPage .ntp-actions-cell { flex-direction: column; align-items: stretch; }
+        #NativeTrickplayConfigPage .ntp-actions-cell .ntp-btn { width: 100%; }
+
+        /* Item table on mobile: hide the actions column header (rows still
+           show the buttons stacked under each title). */
+        #NativeTrickplayConfigPage .ntp-table th { font-size: 0.75em; padding: 0.5em 0.4em; }
+        #NativeTrickplayConfigPage .ntp-table td { padding: 0.5em 0.4em; }
+
+        #NativeTrickplayConfigPage .ntp-row > .ntp-btn,
+        #NativeTrickplayConfigPage .ntp-row > select,
+        #NativeTrickplayConfigPage .ntp-row > input { width: 100%; min-width: 0 !important; flex: 1 1 100%; }
+    }
 </style>
     <div data-role="content">
         <div class="content-primary">
@@ -215,7 +284,7 @@
                     </div>
                 </div>
 
-                <form id="NativeTrickplayConfigForm">
+                <div id="NativeTrickplayConfigForm">
                     <div class="ntp-card">
                         <div class="ntp-card-header">
                             <h2 class="ntp-card-title">Generation</h2>
@@ -227,7 +296,7 @@
                                 <span class="ntp-label-name">Enable plugin</span>
                                 <span class="ntp-label-help">Turn off to disable trickplay generation and master-playlist injection. Existing cached assets are kept.</span>
                             </div>
-                            <label><input id="Enabled" type="checkbox" is="emby-checkbox" /></label>
+                            <label class="ntp-toggle"><input id="Enabled" type="checkbox" /><span class="ntp-toggle-slider"></span></label>
                         </div>
 
                         <div class="ntp-form-row toggle">
@@ -235,7 +304,7 @@
                                 <span class="ntp-label-name">Use hardware decoding</span>
                                 <span class="ntp-label-help">Follows Dashboard → Playback → Transcoding's hwaccel setting. Big speedup for HEVC/HDR sources; encoding stays on CPU.</span>
                             </div>
-                            <label><input id="UseHardwareDecoding" type="checkbox" is="emby-checkbox" /></label>
+                            <label class="ntp-toggle"><input id="UseHardwareDecoding" type="checkbox" /><span class="ntp-toggle-slider"></span></label>
                         </div>
 
                         <div class="ntp-form-row">
@@ -282,7 +351,7 @@
                                 <span class="ntp-label-name">Remove orphaned caches</span>
                                 <span class="ntp-label-help">Drop cache entries whose item is no longer in the library.</span>
                             </div>
-                            <label><input id="PruneOrphans" type="checkbox" is="emby-checkbox" /></label>
+                            <label class="ntp-toggle"><input id="PruneOrphans" type="checkbox" /><span class="ntp-toggle-slider"></span></label>
                         </div>
 
                         <div class="ntp-form-row">
@@ -304,9 +373,9 @@
 
                     <div class="ntp-form-footer">
                         <span class="ntp-form-footer-help">Changes take effect immediately for new playbacks.</span>
-                        <button type="submit" class="ntp-btn ntp-btn-primary">Save settings</button>
+                        <button type="button" id="ntpSaveBtn" class="ntp-btn ntp-btn-primary">Save settings</button>
                     </div>
-                </form>
+                </div>
 
                 <div class="ntp-card">
                     <div class="ntp-card-header">
@@ -412,8 +481,7 @@
         document.querySelector('#NativeTrickplayConfigPage').addEventListener('pagehide', function () {
             ntpStopProgressPolling();
         });
-        document.querySelector('#NativeTrickplayConfigForm').addEventListener('submit', function (e) {
-            e.preventDefault();
+        document.querySelector('#ntpSaveBtn').addEventListener('click', function () {
             ApiClient.getPluginConfiguration(pluginId).then(function (cfg) {
                 cfg.Enabled = document.querySelector('#Enabled').checked;
                 cfg.IframeWidth = parseInt(document.querySelector('#IframeWidth').value, 10);
@@ -426,7 +494,6 @@
                 cfg.MaxCacheGigabytes = parseInt(document.querySelector('#MaxCacheGigabytes').value, 10);
                 ApiClient.updatePluginConfiguration(pluginId, cfg).then(Dashboard.processPluginConfigurationUpdateResult);
             });
-            return false;
         });
 
         // ── Cache management API helpers ──────────────────────────────────
