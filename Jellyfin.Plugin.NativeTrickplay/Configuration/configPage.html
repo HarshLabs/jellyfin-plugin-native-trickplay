@@ -250,6 +250,137 @@
         #NativeTrickplayConfigPage .ntp-results-toolbar .ntp-toolbar-actions .ntp-btn { flex: 1; }
     }
 
+    /* ── Action feedback: row busy state, button loading, toasts ──── */
+    /* Reactive row layout: rows that are queued or actively encoding
+       get a richer display with status pill, partial size, elapsed
+       time, and an inline progress shimmer bar so the user sees
+       direct, live feedback in the table itself instead of scrolling
+       up to the progress card. */
+    #NativeTrickplayConfigPage .ntp-table tr {
+        transition: background-color 200ms ease;
+    }
+    #NativeTrickplayConfigPage .ntp-table tr.ntp-row-busy {
+        background: rgba(10, 132, 255, 0.06);
+    }
+    #NativeTrickplayConfigPage .ntp-table tr.ntp-row-busy .ntp-checkbox,
+    #NativeTrickplayConfigPage .ntp-table tr.ntp-row-busy .ntp-actions-cell {
+        pointer-events: none; opacity: 0.4;
+    }
+    /* "Just finished" flash — green sweep that fades out so completion
+       reads as a first-class transition, not a silent table refresh. */
+    @keyframes ntpFinishFlash {
+        0%   { background: rgba(52, 199, 89, 0.28); }
+        100% { background: rgba(52, 199, 89, 0); }
+    }
+    #NativeTrickplayConfigPage .ntp-table tr.ntp-row-finished {
+        animation: ntpFinishFlash 1.4s ease-out;
+    }
+
+    /* Rich cache-cell content for in-flight rows: badge stack with
+       size + elapsed time underneath, plus a 2-row layout. */
+    #NativeTrickplayConfigPage .ntp-cell-cache .ntp-cell-cache-stack {
+        display: flex; flex-direction: column; gap: 0.25em;
+        align-items: flex-start;
+    }
+    #NativeTrickplayConfigPage .ntp-cell-cache-meta {
+        font-size: 0.78em; opacity: 0.7;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.2;
+    }
+
+    /* Inline shimmer bar at the bottom of an active row */
+    #NativeTrickplayConfigPage .ntp-row-progress {
+        position: relative;
+        height: 2px;
+        background: rgba(127,127,127,0.18);
+        overflow: hidden;
+        margin: 0;
+    }
+    #NativeTrickplayConfigPage .ntp-row-progress::after {
+        content: "";
+        position: absolute; inset: 0;
+        background: linear-gradient(90deg,
+            transparent 0%,
+            rgba(10, 132, 255, 0.0) 20%,
+            rgba(10, 132, 255, 0.85) 50%,
+            rgba(10, 132, 255, 0.0) 80%,
+            transparent 100%);
+        animation: ntpShimmer 1.6s linear infinite;
+    }
+    @keyframes ntpShimmer {
+        0%   { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+    }
+    #NativeTrickplayConfigPage .ntp-row-progress.queued::after {
+        animation-duration: 3s;
+        background: linear-gradient(90deg,
+            transparent 0%,
+            rgba(255, 159, 10, 0.0) 20%,
+            rgba(255, 159, 10, 0.65) 50%,
+            rgba(255, 159, 10, 0.0) 80%,
+            transparent 100%);
+    }
+
+    /* Inline spinner for buttons mid-action so the click registered. */
+    #NativeTrickplayConfigPage .ntp-btn[aria-busy="true"] {
+        pointer-events: none; cursor: progress;
+    }
+    #NativeTrickplayConfigPage .ntp-btn[aria-busy="true"]::after {
+        content: "";
+        display: inline-block;
+        width: 0.95em; height: 0.95em;
+        margin-left: 0.55em;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: ntpSpin 700ms linear infinite;
+        vertical-align: -0.15em;
+    }
+    @keyframes ntpSpin { to { transform: rotate(360deg); } }
+
+    /* Pulse on the running badge so an active encode is unmistakable. */
+    #NativeTrickplayConfigPage .ntp-badge-running {
+        animation: ntpPulse 1.6s ease-in-out infinite;
+    }
+    @keyframes ntpPulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(10, 132, 255, 0.0); }
+        50%      { box-shadow: 0 0 0 4px rgba(10, 132, 255, 0.18); }
+    }
+
+    /* ── Toast notifications (non-blocking, replace Dashboard.alert) */
+    #ntpToastContainer {
+        position: fixed; bottom: 1.5em; right: 1.5em;
+        z-index: 9999;
+        display: flex; flex-direction: column-reverse; gap: 0.5em;
+        pointer-events: none;
+    }
+    .ntp-toast {
+        background: rgba(40,40,42,0.95);
+        color: #fff;
+        padding: 0.85em 1.25em 0.85em 1em;
+        border-radius: 10px;
+        font-size: 0.92em; line-height: 1.4;
+        backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.30);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-left-width: 3px;
+        transform: translateX(110%);
+        opacity: 0;
+        transition: transform 220ms cubic-bezier(0.2,0.7,0.3,1), opacity 220ms ease;
+        pointer-events: auto;
+        min-width: 240px; max-width: 380px;
+    }
+    .ntp-toast-show { transform: translateX(0); opacity: 1; }
+    .ntp-toast-success { border-left-color: #34c759; }
+    .ntp-toast-error   { border-left-color: #ff3b30; }
+    .ntp-toast-warning { border-left-color: #ff9500; }
+    .ntp-toast-info    { border-left-color: #0a84ff; }
+    @media (max-width: 600px) {
+        #ntpToastContainer { left: 0.75em; right: 0.75em; bottom: 0.75em; }
+        .ntp-toast { min-width: 0; max-width: none; transform: translateY(20px); }
+        .ntp-toast.ntp-toast-show { transform: translateY(0); }
+    }
+
     /* ── Button system: primary / secondary / tertiary / danger ─────
        Replaces emby-button on our custom controls so we can enforce a
        consistent hierarchy without fighting Jellyfin's component CSS.
@@ -677,6 +808,151 @@
             return (m > 0 ? m + 'm ' : '') + (sec % 60) + 's';
         }
 
+        // ── Toast notifications ──────────────────────────────────────
+        function ntpToast(message, type) {
+            type = type || 'info';
+            var container = document.getElementById('ntpToastContainer');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'ntpToastContainer';
+                document.body.appendChild(container);
+            }
+            var el = document.createElement('div');
+            el.className = 'ntp-toast ntp-toast-' + type;
+            el.textContent = message;
+            container.appendChild(el);
+            // double-rAF so the transition fires after layout is computed
+            requestAnimationFrame(function () { requestAnimationFrame(function () { el.classList.add('ntp-toast-show'); }); });
+            setTimeout(function () {
+                el.classList.remove('ntp-toast-show');
+                setTimeout(function () { el.remove(); }, 240);
+            }, 3500);
+        }
+
+        // ── Button loading wrapper ───────────────────────────────────
+        function ntpWithBusy(btn, fn) {
+            if (!btn) return fn();
+            var origText = btn.textContent;
+            btn.setAttribute('aria-busy', 'true');
+            return Promise.resolve(fn()).finally(function () {
+                btn.removeAttribute('aria-busy');
+                if (btn.textContent !== origText) btn.textContent = origText;
+            });
+        }
+
+        // ── Reactive table row state ─────────────────────────────────
+        // Track which rows are currently in-flight so we can detect
+        // the transition from busy → finished and play the flash +
+        // single-row refresh.
+        var ntpBusyRowIds = new Set();
+        var ntpRowFinishedTimer = null;
+
+        function ntpBuildBusyCell(state) {
+            // state = { Status, PartialBytes, StartedUtc, ServerUtc }
+            var badge = state.Status === 'running'
+                ? '<span class="ntp-badge ntp-badge-running">▶ encoding</span>'
+                : '<span class="ntp-badge ntp-badge-queued">⏸ queued</span>';
+            var meta = '';
+            if (state.Status === 'running') {
+                var pieces = [];
+                if (state.PartialBytes) pieces.push(ntpFmtBytes(state.PartialBytes));
+                if (state.StartedUtc && state.ServerUtc) pieces.push(ntpFmtElapsed(state.StartedUtc, state.ServerUtc));
+                if (pieces.length) meta = '<div class="ntp-cell-cache-meta">' + pieces.join(' · ') + '</div>';
+            }
+            return '<div class="ntp-cell-cache-stack">' + badge + meta + '</div>';
+        }
+
+        function ntpApplyRowBusy(tr, state) {
+            tr.classList.add('ntp-row-busy');
+            tr.classList.remove('ntp-row-finished');
+            var cacheCell = tr.querySelector('.ntp-cell-cache');
+            if (cacheCell) cacheCell.innerHTML = ntpBuildBusyCell(state);
+            // Inline shimmer bar appended after the row (rendered as a
+            // full-width row spanning all columns).
+            var nextSibling = tr.nextElementSibling;
+            if (!nextSibling || !nextSibling.classList.contains('ntp-row-progress-row')) {
+                var bar = document.createElement('tr');
+                bar.className = 'ntp-row-progress-row';
+                var td = document.createElement('td');
+                td.colSpan = 4;
+                td.style.padding = '0';
+                td.style.borderBottom = '1px solid rgba(127,127,127,0.04)';
+                var inner = document.createElement('div');
+                inner.className = 'ntp-row-progress' + (state.Status === 'queued' ? ' queued' : '');
+                td.appendChild(inner);
+                bar.appendChild(td);
+                tr.parentNode.insertBefore(bar, tr.nextSibling);
+            } else {
+                // Toggle queued/running class on existing bar
+                var inner2 = nextSibling.querySelector('.ntp-row-progress');
+                if (inner2) inner2.className = 'ntp-row-progress' + (state.Status === 'queued' ? ' queued' : '');
+            }
+            // Disable checkbox + uncheck (so a busy row can't be
+            // re-queued by Generate Selected accidentally).
+            var cb = tr.querySelector('.ntpItemCheck');
+            if (cb) { cb.checked = false; cb.disabled = true; }
+        }
+
+        function ntpClearRowBusy(tr) {
+            tr.classList.remove('ntp-row-busy');
+            tr.classList.add('ntp-row-finished');
+            // Remove shimmer bar
+            var nextSibling = tr.nextElementSibling;
+            if (nextSibling && nextSibling.classList.contains('ntp-row-progress-row')) {
+                nextSibling.remove();
+            }
+            var cb = tr.querySelector('.ntpItemCheck');
+            if (cb) cb.disabled = false;
+            // Strip the flash class once the animation has played out.
+            setTimeout(function () { tr.classList.remove('ntp-row-finished'); }, 1500);
+        }
+
+        function ntpUpdateTableFromProgress(p) {
+            var byId = {};
+            (p.Inflight || []).forEach(function (it) { byId[it.ItemId] = it; });
+
+            var seenIds = new Set(Object.keys(byId));
+            var anyFinished = false;
+
+            document.querySelectorAll('.ntp-table tbody tr[data-item-id]').forEach(function (tr) {
+                var id = tr.getAttribute('data-item-id');
+                var inflight = byId[id];
+                if (inflight) {
+                    ntpApplyRowBusy(tr, {
+                        Status: inflight.Status,
+                        PartialBytes: inflight.PartialBytes,
+                        StartedUtc: inflight.StartedUtc,
+                        ServerUtc: p.ServerUtc,
+                    });
+                    ntpBusyRowIds.add(id);
+                } else if (ntpBusyRowIds.has(id)) {
+                    // Was busy, now finished — flash + clear, schedule refresh.
+                    ntpBusyRowIds.delete(id);
+                    ntpClearRowBusy(tr);
+                    anyFinished = true;
+                }
+            });
+
+            // Drop tracked IDs whose row is no longer rendered (paged out).
+            ntpBusyRowIds.forEach(function (id) {
+                if (!seenIds.has(id)) {
+                    var stillThere = document.querySelector('tr[data-item-id="' + id + '"]');
+                    if (!stillThere) ntpBusyRowIds.delete(id);
+                }
+            });
+
+            // After a finished row's flash ends, refresh search to pull
+            // the new cache size and reset action buttons. Debounce to
+            // a single re-fetch even if multiple finish at once.
+            if (anyFinished) {
+                if (ntpRowFinishedTimer) clearTimeout(ntpRowFinishedTimer);
+                ntpRowFinishedTimer = setTimeout(function () {
+                    ntpRowFinishedTimer = null;
+                    ntpRunSearch();
+                }, 1600);
+            }
+        }
+
         // ── Status panel ──────────────────────────────────────────────────
         function ntpRefreshStatus() {
             return ntpFetch('Status').then(function (s) {
@@ -717,6 +993,10 @@
         var ntpLastInflightCount = -1;
         function ntpPollProgress() {
             return ntpFetch('Progress').then(function (p) {
+                // Always sync table rows first — this is the live
+                // feedback loop the user sees while watching the table.
+                ntpUpdateTableFromProgress(p);
+
                 var box = document.querySelector('#ntpProgress');
                 var list = document.querySelector('#ntpProgressList');
                 if (!p.Inflight || p.Inflight.length === 0) {
@@ -787,7 +1067,7 @@
                     return '<tr data-item-id="' + it.Id + '">' +
                         '<td><input type="checkbox" class="ntpItemCheck ntp-checkbox" value="' + it.Id + '" /></td>' +
                         '<td>' + title + '</td>' +
-                        '<td>' + status + '</td>' +
+                        '<td class="ntp-cell-cache">' + status + '</td>' +
                         '<td class="ntp-actions-cell">' +
                             '<button class="ntp-btn ntp-btn-secondary ntp-btn-sm ntpRowGenerate" data-id="' + it.Id + '" type="button">' + (it.Cached ? 'Regenerate' : 'Generate') + '</button>' +
                             (it.Cached ? '<button class="ntp-btn ntp-btn-danger ntp-btn-sm ntpRowEvict" data-id="' + it.Id + '" type="button">Evict</button>' : '') +
@@ -795,10 +1075,10 @@
                 }).join('') + '</tbody></table>';
             document.querySelector('#ntpResults').innerHTML = html;
             document.querySelectorAll('.ntpRowGenerate').forEach(function (b) {
-                b.addEventListener('click', function () { ntpAct('Generate', [b.dataset.id]); });
+                b.addEventListener('click', function () { ntpAct('Generate', [b.dataset.id], b); });
             });
             document.querySelectorAll('.ntpRowEvict').forEach(function (b) {
-                b.addEventListener('click', function () { ntpAct('Evict', [b.dataset.id]); });
+                b.addEventListener('click', function () { ntpAct('Evict', [b.dataset.id], b); });
             });
         }
         function ntpRunSearch() {
@@ -811,21 +1091,51 @@
             if (search) qs += '&search=' + encodeURIComponent(search);
             return ntpFetch('Items?' + qs).then(ntpRenderItems);
         }
-        function ntpAct(verb, ids) {
+        function ntpAct(verb, ids, btn) {
             if (!ids || ids.length === 0) {
-                Dashboard.alert('Select at least one item first.');
-                return;
+                ntpToast('Select at least one item first.', 'warning');
+                return Promise.resolve();
             }
-            return ntpFetch(verb, {
-                type: 'POST',
-                contentType: 'application/json',
-                data: JSON.stringify({ ItemIds: ids })
+
+            // Optimistic UI: immediately mark queued rows so the user
+            // sees confirmation before the server even responds.
+            if (verb === 'Generate') {
+                ids.forEach(function (id) {
+                    var tr = document.querySelector('tr[data-item-id="' + id + '"]');
+                    if (tr) {
+                        ntpApplyRowBusy(tr, { Status: 'queued' });
+                        ntpBusyRowIds.add(id);
+                    }
+                });
+            }
+
+            return ntpWithBusy(btn, function () {
+                return ntpFetch(verb, {
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ ItemIds: ids })
+                });
             }).then(function (r) {
-                var label = verb === 'Generate' ? 'queued' : 'evicted';
-                Dashboard.alert(r.Queued + ' items ' + label +
-                    (r.Skipped > 0 ? ', ' + r.Skipped + ' skipped' : ''));
+                var n = r.Queued || 0;
+                var actionLabel = verb === 'Generate' ? 'queued for generation' : 'evicted from cache';
+                var msg = n + ' item' + (n === 1 ? '' : 's') + ' ' + actionLabel;
+                if (r.Skipped > 0) msg += ' · ' + r.Skipped + ' skipped';
+                ntpToast(msg, 'success');
                 ntpRefreshStatus();
+                // Speed up the next progress tick so feedback is near-instant.
+                if (verb === 'Generate') ntpPollProgress();
                 if (verb === 'Evict') ntpRunSearch();
+            }).catch(function (err) {
+                ntpToast('Action failed' + (err && err.message ? ': ' + err.message : ''), 'error');
+                if (verb === 'Generate') {
+                    // Roll back the optimistic update.
+                    ids.forEach(function (id) {
+                        var tr = document.querySelector('tr[data-item-id="' + id + '"]');
+                        if (tr) ntpClearRowBusy(tr);
+                        ntpBusyRowIds.delete(id);
+                    });
+                    ntpRunSearch();
+                }
             });
         }
         function ntpSelectedIds() {
@@ -834,35 +1144,67 @@
 
         // ── Wire up all UI events ─────────────────────────────────────────
         document.querySelector('#ntpRefreshStatusBtn').addEventListener('click', ntpRefreshStatus);
-        document.querySelector('#ntpSearchBtn').addEventListener('click', ntpRunSearch);
+        document.querySelector('#ntpSearchBtn').addEventListener('click', function (e) { ntpRunSearch(e.currentTarget); });
+
+        // Debounced live search: re-run search 280ms after the user
+        // stops typing. Enter still fires immediately.
+        var ntpSearchDebounce = null;
+        document.querySelector('#ntpSearch').addEventListener('input', function () {
+            if (ntpSearchDebounce) clearTimeout(ntpSearchDebounce);
+            ntpSearchDebounce = setTimeout(function () {
+                ntpSearchDebounce = null;
+                ntpRunSearch();
+            }, 280);
+        });
         document.querySelector('#ntpSearch').addEventListener('keydown', function (e) {
-            if (e.key === 'Enter') { e.preventDefault(); ntpRunSearch(); }
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                if (ntpSearchDebounce) { clearTimeout(ntpSearchDebounce); ntpSearchDebounce = null; }
+                ntpRunSearch();
+            }
         });
-        document.querySelector('#ntpFilterCached').addEventListener('change', ntpRunSearch);
-        document.querySelector('#ntpSortBy').addEventListener('change', ntpRunSearch);
+        document.querySelector('#ntpFilterCached').addEventListener('change', function () { ntpRunSearch(); });
+        document.querySelector('#ntpSortBy').addEventListener('change', function () { ntpRunSearch(); });
         document.querySelector('#ntpSelectAll').addEventListener('change', function (e) {
-            document.querySelectorAll('.ntpItemCheck').forEach(function (c) { c.checked = e.target.checked; });
+            document.querySelectorAll('.ntpItemCheck:not(:disabled)').forEach(function (c) { c.checked = e.target.checked; });
         });
-        document.querySelector('#ntpGenerateSelectedBtn').addEventListener('click', function () {
-            ntpAct('Generate', ntpSelectedIds());
+        document.querySelector('#ntpGenerateSelectedBtn').addEventListener('click', function (e) {
+            ntpAct('Generate', ntpSelectedIds(), e.currentTarget);
         });
-        document.querySelector('#ntpEvictSelectedBtn').addEventListener('click', function () {
-            ntpAct('Evict', ntpSelectedIds());
+        document.querySelector('#ntpEvictSelectedBtn').addEventListener('click', function (e) {
+            ntpAct('Evict', ntpSelectedIds(), e.currentTarget);
         });
-        document.querySelector('#ntpGenerateLibraryBtn').addEventListener('click', function () {
+        document.querySelector('#ntpGenerateLibraryBtn').addEventListener('click', function (e) {
+            var btn = e.currentTarget;
             var libId = document.querySelector('#ntpLibrarySelect').value;
-            if (!libId) { Dashboard.alert('Pick a library first.'); return; }
-            ntpFetch('GenerateLibrary', {
-                type: 'POST',
-                contentType: 'application/json',
-                data: JSON.stringify({ LibraryId: libId })
+            if (!libId) { ntpToast('Pick a library first.', 'warning'); return; }
+            ntpWithBusy(btn, function () {
+                return ntpFetch('GenerateLibrary', {
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ LibraryId: libId })
+                });
             }).then(function (r) {
-                Dashboard.alert(r.Queued + ' items queued for generation' +
-                    (r.Skipped > 0 ? ' (' + r.Skipped + ' skipped)' : '') +
-                    '. They will be encoded in the background.');
+                var n = r.Queued || 0;
+                var msg = n + ' item' + (n === 1 ? '' : 's') + ' queued for generation';
+                if (r.Skipped > 0) msg += ' · ' + r.Skipped + ' already done';
+                ntpToast(msg, 'success');
                 ntpRefreshStatus();
+                ntpPollProgress();
+                ntpRunSearch();
+            }).catch(function (err) {
+                ntpToast('Library queue failed' + (err && err.message ? ': ' + err.message : ''), 'error');
             });
         });
+
+        // Update the modify the existing ntpRunSearch to also accept an
+        // optional button to show a busy state on. (Keep the no-arg
+        // signature for backward compatibility with existing callers.)
+        var _ntpRunSearchOrig = ntpRunSearch;
+        ntpRunSearch = function (btn) {
+            if (btn) return ntpWithBusy(btn, function () { return _ntpRunSearchOrig(); });
+            return _ntpRunSearchOrig();
+        };
     </script>
 </div>
 </body>
