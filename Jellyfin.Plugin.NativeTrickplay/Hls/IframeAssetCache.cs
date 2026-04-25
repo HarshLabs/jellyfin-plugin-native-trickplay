@@ -377,8 +377,20 @@ public sealed class IframeAssetCache
             // HDR: 10-bit HEVC Main10 with PQ or HLG signaling so AVPlayer
             // accepts the I-frame variant alongside HDR primaries (Apple HLS
             // Authoring Spec §4.4.4 — variant VIDEO-RANGE must match family).
+            //
             // -tag:v hvc1 is critical: Apple players only honor `hvc1`-tagged
             // HEVC; `hev1` (in-band parameter sets) won't initialize the decoder.
+            //
+            // CRITICAL: do NOT pass keyint=1 to x265-params. x265 detects all-
+            // keyframe output and switches to "Main 10 Intra" profile, which is
+            // HEVC profile_idc=4 (Range Extensions / Rext) in the bitstream
+            // classification — Apple HEVC decoders only accept Main and Main10
+            // (profile_idc=2). Output of a Rext-tagged bitstream causes
+            // AVPlayer to reject the master.
+            //
+            // Instead: drive keyframes from ffmpeg's side via
+            // -force_key_frames "expr:1" (every frame is a keyframe), which x265
+            // doesn't recognize as Intra-profile mode → emits standard Main10.
             var transfer = variant == IframeVariant.HdrHlg ? "arib-std-b67" : "smpte2084";
             var hdrFlag = variant == IframeVariant.HdrPq ? ":hdr10=1" : string.Empty;
             args.AddRange(new[]
@@ -387,10 +399,11 @@ public sealed class IframeAssetCache
                 "-c:v", "libx265",
                 "-preset", cfg.IframePreset,
                 "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
-                "-profile:v", "main10", "-level:v", "5.0",
+                "-profile:v", "main10",
                 "-tag:v", "hvc1",
+                "-force_key_frames", "expr:1",
                 "-x265-params",
-                $"colorprim=bt2020:transfer={transfer}:colormatrix=bt2020nc{hdrFlag}:repeat-headers=1:keyint=1:scenecut=0:open-gop=0:log-level=error",
+                $"colorprim=bt2020:transfer={transfer}:colormatrix=bt2020nc{hdrFlag}:repeat-headers=1:scenecut=0:log-level=error",
             });
         }
 
