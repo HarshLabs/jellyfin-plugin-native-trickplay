@@ -258,11 +258,26 @@ public sealed class IframeAssetCache
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
         };
 
-        // Hardware decode args go BEFORE -i. For VAAPI / QSV / VideoToolbox / CUDA the
-        // hardware-decoded frames are auto-copied back to system memory by ffmpeg when
-        // they enter a CPU filter chain (our scale + format conversion), so libx264
-        // can encode them. No explicit hwdownload needed for our case.
+        // Hardware decode args go BEFORE -i. With bare `-hwaccel <type>` (no
+        // `-hwaccel_output_format`), ffmpeg auto-transfers decoded frames from
+        // GPU to system memory in their native CPU pixel format (nv12 for 8-bit,
+        // p010 for 10-bit) — the libx264 software encoder + the scale/format
+        // CPU filter chain consume them directly.
+        //
+        // Setting `-hwaccel_output_format nv12` would force a fixed-format GPU→
+        // CPU transfer that fails on 10-bit HEVC sources (Intel QSV and
+        // VideoToolbox both error with "Failed to transfer data to output
+        // frame: -1313558101"). hwdownload is only valid paired with
+        // `-hwaccel_output_format <gpu-format>` because it requires HW frames
+        // as input — without the flag, frames are already CPU-side and
+        // hwdownload errors with "Impossible to convert between formats".
+        //
+        // This pattern mirrors Jellyfin's own GetSwVidFilterChain (its
+        // "copy-back" path for SW-encode-after-HW-decode). See
+        // MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs.
         AppendHwaccelArgs(cfg, args);
+
+        var width = cfg.IframeWidth.ToString(CultureInfo.InvariantCulture);
 
         args.AddRange(new[]
         {
@@ -270,7 +285,7 @@ public sealed class IframeAssetCache
             "-i", inputPath,
             "-an", "-sn",
             "-fps_mode", "passthrough",
-            "-vf", $"scale=-2:{cfg.IframeWidth.ToString(CultureInfo.InvariantCulture)},format=yuv420p",
+            "-vf", $"scale=-2:{width},format=yuv420p",
             "-c:v", "libx264",
             "-preset", cfg.IframePreset,
             "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
@@ -295,15 +310,18 @@ public sealed class IframeAssetCache
             return;
         }
 
-        int beforeCount = args.Count;
-
         // Map Jellyfin's HardwareAccelerationType enum to the corresponding ffmpeg
         // -hwaccel decoder. NVENC/AMF are encoder names, not decoders — for those
         // we map to the matching decode-side hwaccel that the same GPU exposes.
+        // Per-hwaccel refinements mirror Jellyfin's own EncodingHelper.GetHwaccelType
+        // (MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs).
         switch (opts.HardwareAccelerationType)
         {
             case HardwareAccelerationType.videotoolbox:
                 args.Add("-hwaccel"); args.Add("videotoolbox");
+                // Trickplay extraction is background work — yield GPU time to
+                // foreground playback transcodes. Supported in jellyfin-ffmpeg 7.x.
+                args.Add("-hwaccel_flags"); args.Add("+low_priority");
                 break;
             case HardwareAccelerationType.qsv:
                 args.Add("-hwaccel"); args.Add("qsv");
@@ -321,7 +339,10 @@ public sealed class IframeAssetCache
                 break;
             case HardwareAccelerationType.nvenc:
                 // NVENC is the NVIDIA encoder; the matching decode hwaccel is `cuda`.
+                // nvdec is single-threaded internally — ffmpeg's auto-thread heuristic
+                // oversubscribes if we don't pin to 1.
                 args.Add("-hwaccel"); args.Add("cuda");
+                args.Add("-threads"); args.Add("1");
                 break;
             case HardwareAccelerationType.amf:
                 // AMF is AMD's encode framework; AMD decode in ffmpeg is platform-specific:
@@ -329,6 +350,7 @@ public sealed class IframeAssetCache
                 if (OperatingSystem.IsWindows())
                 {
                     args.Add("-hwaccel"); args.Add("d3d11va");
+                    args.Add("-threads"); args.Add("2");
                 }
                 else if (OperatingSystem.IsLinux())
                 {
@@ -351,18 +373,6 @@ public sealed class IframeAssetCache
             case HardwareAccelerationType.none:
             default:
                 break;
-        }
-
-        // If hwaccel was added, force the decoder to output an NV12 frame in
-        // system memory so the libx264 software encode + scale/format CPU
-        // filter chain can pick it up directly. Without this, VAAPI/QSV/CUDA
-        // hand off GPU surfaces and ffmpeg's auto_scale filter bails with
-        // "Impossible to convert between the formats". VideoToolbox happens
-        // to auto-download to a CPU-readable format already; the explicit
-        // hint is harmless there.
-        if (args.Count > beforeCount)
-        {
-            args.Add("-hwaccel_output_format"); args.Add("nv12");
         }
     }
 

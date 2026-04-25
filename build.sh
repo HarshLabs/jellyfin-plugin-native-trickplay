@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT="Jellyfin.Plugin.NativeTrickplay"
-VERSION="1.0.7.0"
+VERSION="1.0.8.0"
 PLUGIN_GUID="6911edf0-840d-4a71-965d-1319cbb2efd1"
 PLUGIN_NAME="NativeTrickplay"
 
