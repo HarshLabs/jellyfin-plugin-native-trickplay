@@ -30,6 +30,15 @@ public class PluginConfiguration : BasePluginConfiguration
     /// </summary>
     public bool UseHardwareDecoding { get; set; } = true;
 
+    /// <summary>
+    /// Absolute filesystem path where iframe assets are stored. Empty = use
+    /// Jellyfin's default cache directory. Useful for putting the cache on a
+    /// larger / faster / dedicated drive. The plugin doesn't migrate existing
+    /// cache when this is changed — old assets stay at the old path and become
+    /// orphaned (delete manually, or just let them sit).
+    /// </summary>
+    public string CacheDirectory { get; set; } = string.Empty;
+
     // Pruner knobs (used by PruneTrickplayCacheTask)
     public bool PruneOrphans { get; set; } = true;
     public int MaxAgeDays { get; set; } = 90;             // 0 = disabled

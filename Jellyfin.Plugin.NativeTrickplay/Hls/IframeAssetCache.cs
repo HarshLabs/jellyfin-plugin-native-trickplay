@@ -52,6 +52,33 @@ public sealed class IframeAssetCache
     }
 
     /// <summary>
+    /// Resolves the cache root, honoring the plugin's CacheDirectory config
+    /// (empty falls back to Jellyfin's default cache path). If the configured
+    /// path can't be created/accessed, logs a warning and uses the default —
+    /// we never throw from the cache root resolver because every endpoint
+    /// calls it on the hot path.
+    /// </summary>
+    private string GetCacheRoot()
+    {
+        var custom = Plugin.Instance?.Configuration.CacheDirectory;
+        if (!string.IsNullOrWhiteSpace(custom))
+        {
+            try
+            {
+                Directory.CreateDirectory(custom);
+                return custom;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "[NativeTrickplay] custom cache path {Path} unusable; using default",
+                    custom);
+            }
+        }
+        return Path.Combine(_paths.CachePath, "native-trickplay");
+    }
+
+    /// <summary>
     /// Synchronous, no-side-effect check: is the asset already on disk and fresh
     /// (mtime matches)? Returns the asset or null. Used by the controller hot path
     /// so that fully-cached items respond in &lt; 1 ms with no generation work.
@@ -61,7 +88,7 @@ public sealed class IframeAssetCache
         if (_libraryManager.GetItemById(itemId) is not BaseItem item || string.IsNullOrEmpty(item.Path))
             return null;
 
-        var dir = Path.Combine(_paths.CachePath, "native-trickplay", itemId.ToString("N"));
+        var dir = Path.Combine(GetCacheRoot(), itemId.ToString("N"));
         var playlistPath = Path.Combine(dir, "iframe.m3u8");
         var segmentPath = Path.Combine(dir, "iframe.m4s");
         var stampPath = Path.Combine(dir, ".source-mtime");
@@ -121,7 +148,7 @@ public sealed class IframeAssetCache
 
     public IEnumerable<CacheEntry> EnumerateCache()
     {
-        var root = Path.Combine(_paths.CachePath, "native-trickplay");
+        var root = GetCacheRoot();
         if (!Directory.Exists(root)) yield break;
 
         foreach (var dirPath in Directory.EnumerateDirectories(root))
@@ -154,7 +181,7 @@ public sealed class IframeAssetCache
         var key = itemId.ToString("N");
         if (_inflight.ContainsKey(key)) return false;
 
-        var dir = Path.Combine(_paths.CachePath, "native-trickplay", key);
+        var dir = Path.Combine(GetCacheRoot(), key);
         if (!Directory.Exists(dir)) return false;
 
         try
@@ -176,7 +203,7 @@ public sealed class IframeAssetCache
         var sourcePath = item.Path;
         var sourceMtime = File.GetLastWriteTimeUtc(sourcePath);
 
-        var dir = Path.Combine(_paths.CachePath, "native-trickplay", itemId.ToString("N"));
+        var dir = Path.Combine(GetCacheRoot(), itemId.ToString("N"));
         Directory.CreateDirectory(dir);
 
         var playlistPath = Path.Combine(dir, "iframe.m3u8");
