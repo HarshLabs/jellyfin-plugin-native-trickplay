@@ -3,134 +3,292 @@
 <head>
     <meta charset="UTF-8">
     <title>Native Trickplay</title>
+    <style>
+        /* ── Apple-y dashboard layout ──────────────────────────────────
+           Custom rules scoped to the plugin page so we don't touch
+           Jellyfin's global styles. Uses emby-button / emby-input / etc.
+           for form controls so the theme (light/dark) carries through. */
+        #NativeTrickplayConfigPage .ntp-wrap { max-width: 1100px; margin: 0 auto; padding: 1.5em 0 4em; }
+
+        #NativeTrickplayConfigPage .ntp-hero {
+            display: flex; gap: 1em; align-items: flex-start;
+            padding: 1.25em 0 1.5em; border-bottom: 1px solid rgba(255,255,255,0.06);
+            margin-bottom: 1.5em;
+        }
+        #NativeTrickplayConfigPage .ntp-hero-title { margin: 0; font-size: 1.7em; font-weight: 600; letter-spacing: -0.01em; }
+        #NativeTrickplayConfigPage .ntp-hero-subtitle { margin: 0.25em 0 0; opacity: 0.65; font-size: 0.95em; max-width: 65ch; line-height: 1.45; }
+
+        #NativeTrickplayConfigPage .ntp-card {
+            background: rgba(255,255,255,0.025);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            padding: 1.5em;
+            margin-bottom: 1em;
+        }
+        #NativeTrickplayConfigPage .ntp-card-header { margin: 0 0 1em; display: flex; align-items: baseline; gap: 0.6em; flex-wrap: wrap; }
+        #NativeTrickplayConfigPage .ntp-card-title { margin: 0; font-size: 1.15em; font-weight: 600; }
+        #NativeTrickplayConfigPage .ntp-card-subtitle { margin: 0; opacity: 0.55; font-size: 0.85em; }
+
+        #NativeTrickplayConfigPage .ntp-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
+        @media (max-width: 820px) { #NativeTrickplayConfigPage .ntp-grid-2 { grid-template-columns: 1fr; } }
+
+        #NativeTrickplayConfigPage .ntp-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1em; }
+        #NativeTrickplayConfigPage .ntp-stat-value { font-size: 1.6em; font-weight: 600; line-height: 1.1; letter-spacing: -0.01em; }
+        #NativeTrickplayConfigPage .ntp-stat-label { font-size: 0.82em; opacity: 0.6; margin-top: 0.15em; text-transform: uppercase; letter-spacing: 0.04em; }
+
+        #NativeTrickplayConfigPage .ntp-row { display: flex; gap: 0.6em; align-items: center; flex-wrap: wrap; }
+        #NativeTrickplayConfigPage .ntp-row > .ntp-spacer { flex: 1; }
+
+        #NativeTrickplayConfigPage .ntp-form-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(160px, 220px); gap: 1.5em; align-items: center; padding: 0.6em 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+        #NativeTrickplayConfigPage .ntp-form-row:last-child { border-bottom: none; }
+        #NativeTrickplayConfigPage .ntp-form-row .ntp-label { display: flex; flex-direction: column; gap: 0.15em; }
+        #NativeTrickplayConfigPage .ntp-form-row .ntp-label-name { font-weight: 500; }
+        #NativeTrickplayConfigPage .ntp-form-row .ntp-label-help { font-size: 0.82em; opacity: 0.55; line-height: 1.4; }
+        #NativeTrickplayConfigPage .ntp-form-row input[type="text"],
+        #NativeTrickplayConfigPage .ntp-form-row input[type="number"],
+        #NativeTrickplayConfigPage .ntp-form-row select { width: 100%; }
+        #NativeTrickplayConfigPage .ntp-form-row.toggle { grid-template-columns: 1fr auto; }
+
+        #NativeTrickplayConfigPage .ntp-libcoverage { display: grid; grid-template-columns: 1fr; gap: 0.5em; }
+        #NativeTrickplayConfigPage .ntp-libcoverage-row { display: grid; grid-template-columns: 1fr auto auto; gap: 0.75em; align-items: center; padding: 0.4em 0; }
+        #NativeTrickplayConfigPage .ntp-libcoverage-row .ntp-libcoverage-bar { background: rgba(255,255,255,0.06); height: 4px; border-radius: 2px; overflow: hidden; min-width: 80px; }
+        #NativeTrickplayConfigPage .ntp-libcoverage-row .ntp-libcoverage-bar-fill { height: 100%; background: linear-gradient(90deg, #34c759, #30a3f0); transition: width 0.3s ease; }
+        #NativeTrickplayConfigPage .ntp-libcoverage-row .ntp-libcoverage-counts { font-variant-numeric: tabular-nums; opacity: 0.75; font-size: 0.9em; min-width: 90px; text-align: right; }
+
+        #NativeTrickplayConfigPage .ntp-table { width: 100%; border-collapse: collapse; }
+        #NativeTrickplayConfigPage .ntp-table th { text-align: left; padding: 0.6em 0.5em; font-weight: 500; font-size: 0.85em; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.03em; border-bottom: 1px solid rgba(255,255,255,0.08); position: sticky; top: 0; background: rgba(15,15,17,0.95); backdrop-filter: blur(6px); z-index: 1; }
+        #NativeTrickplayConfigPage .ntp-table td { padding: 0.6em 0.5em; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; }
+        #NativeTrickplayConfigPage .ntp-table tbody tr:hover { background: rgba(255,255,255,0.025); }
+        #NativeTrickplayConfigPage .ntp-table tbody tr:last-child td { border-bottom: none; }
+
+        #NativeTrickplayConfigPage .ntp-badge {
+            display: inline-flex; align-items: center; gap: 0.25em;
+            padding: 0.18em 0.6em; border-radius: 999px;
+            font-size: 0.78em; font-weight: 500;
+            white-space: nowrap;
+        }
+        #NativeTrickplayConfigPage .ntp-badge-cached { background: rgba(52, 199, 89, 0.16); color: rgb(70, 215, 110); }
+        #NativeTrickplayConfigPage .ntp-badge-uncached { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.45); }
+        #NativeTrickplayConfigPage .ntp-badge-running { background: rgba(10, 132, 255, 0.18); color: rgb(80, 165, 255); }
+        #NativeTrickplayConfigPage .ntp-badge-queued { background: rgba(255, 159, 10, 0.18); color: rgb(255, 178, 56); }
+
+        #NativeTrickplayConfigPage .ntp-results { border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; max-height: 520px; overflow-y: auto; background: rgba(0,0,0,0.15); }
+        #NativeTrickplayConfigPage .ntp-empty { padding: 2em; text-align: center; opacity: 0.55; font-size: 0.95em; }
+        #NativeTrickplayConfigPage .ntp-results-meta { opacity: 0.55; font-size: 0.85em; font-variant-numeric: tabular-nums; }
+
+        #NativeTrickplayConfigPage .ntp-search-help { font-size: 0.82em; opacity: 0.55; margin: 0.4em 0 0; line-height: 1.4; }
+        #NativeTrickplayConfigPage .ntp-search-help code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 3px; font-size: 0.95em; }
+
+        #NativeTrickplayConfigPage .ntp-actions-cell { white-space: nowrap; }
+        #NativeTrickplayConfigPage .ntp-actions-cell button { margin-left: 0.3em; }
+
+        #NativeTrickplayConfigPage .ntp-mini-btn {
+            background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px; padding: 0.3em 0.65em; font-size: 0.82em;
+            cursor: pointer; color: inherit;
+        }
+        #NativeTrickplayConfigPage .ntp-mini-btn:hover { background: rgba(255,255,255,0.1); }
+        #NativeTrickplayConfigPage .ntp-mini-btn-danger { background: rgba(255, 69, 58, 0.15); border-color: rgba(255, 69, 58, 0.3); color: rgb(255, 130, 120); }
+        #NativeTrickplayConfigPage .ntp-mini-btn-danger:hover { background: rgba(255, 69, 58, 0.25); }
+    </style>
 </head>
 <body>
-<div id="NativeTrickplayConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+<div id="NativeTrickplayConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox,emby-select">
     <div data-role="content">
         <div class="content-primary">
-            <form id="NativeTrickplayConfigForm">
-                <div class="verticalSection">
-                    <h2>Native Trickplay</h2>
-                    <p>Generates HLS I-frame playlists so AVPlayer (Apple TV) gets native scrubbing thumbnails. Asset is built once per item and cached.</p>
+            <div class="ntp-wrap">
+
+                <div class="ntp-hero">
+                    <div style="flex:1;">
+                        <h1 class="ntp-hero-title">Native Trickplay</h1>
+                        <p class="ntp-hero-subtitle">Generates HLS I-frame playlists so AVPlayer-based clients (Apple TV) get native scrubbing thumbnails on the transport bar. Each item is encoded once and cached on disk.</p>
+                    </div>
                 </div>
 
-                <div class="verticalSection">
-                    <h3>Generation</h3>
-                </div>
-                <div class="checkboxContainer">
-                    <label>
-                        <input id="Enabled" type="checkbox" is="emby-checkbox" />
-                        <span>Enable plugin</span>
-                    </label>
-                </div>
-                <div class="inputContainer">
-                    <label class="inputLabel" for="IframeWidth">Thumbnail width (px, height auto-scaled)</label>
-                    <input id="IframeWidth" type="number" is="emby-input" min="160" max="1920" />
-                </div>
-                <div class="inputContainer">
-                    <label class="inputLabel" for="IframeCrf">CRF (encoder quality, lower=better; 18-32 typical)</label>
-                    <input id="IframeCrf" type="number" is="emby-input" min="18" max="40" />
-                </div>
-                <div class="inputContainer">
-                    <label class="inputLabel" for="IframeIntervalSeconds">Thumbnail interval (seconds between scrubbing thumbnails)</label>
-                    <input id="IframeIntervalSeconds" type="number" is="emby-input" min="1" max="60" step="1" />
-                    <div class="fieldDescription">1 = one thumbnail per second of source (smoothest scrubbing, ~30 MB cache for a 25-min episode at 320p). Increase to 5 or 10 if disk space matters more than scrubbing granularity.</div>
-                </div>
-                <div class="checkboxContainer">
-                    <label>
-                        <input id="UseHardwareDecoding" type="checkbox" is="emby-checkbox" />
-                        <span>Use hardware acceleration for decode (follows Dashboard → Playback → Transcoding setting)</span>
-                    </label>
-                </div>
-                <div class="inputContainer">
-                    <label class="inputLabel" for="CacheDirectory">Cache directory (absolute path; leave blank to use Jellyfin's default)</label>
-                    <input id="CacheDirectory" type="text" is="emby-input" placeholder="e.g. /mnt/storage/native-trickplay" />
-                    <div class="fieldDescription">If you change this, existing cached assets at the old path become orphaned — delete them manually if you don't want to re-encode from scratch.</div>
+                <form id="NativeTrickplayConfigForm">
+                    <div class="ntp-card">
+                        <div class="ntp-card-header">
+                            <h2 class="ntp-card-title">Generation</h2>
+                            <span class="ntp-card-subtitle">How thumbnails are encoded</span>
+                        </div>
+
+                        <div class="ntp-form-row toggle">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Enable plugin</span>
+                                <span class="ntp-label-help">Turn off to disable trickplay generation and master-playlist injection. Existing cached assets are kept.</span>
+                            </div>
+                            <label><input id="Enabled" type="checkbox" is="emby-checkbox" /></label>
+                        </div>
+
+                        <div class="ntp-form-row toggle">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Use hardware decoding</span>
+                                <span class="ntp-label-help">Follows Dashboard → Playback → Transcoding's hwaccel setting. Big speedup for HEVC/HDR sources; encoding stays on CPU.</span>
+                            </div>
+                            <label><input id="UseHardwareDecoding" type="checkbox" is="emby-checkbox" /></label>
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Thumbnail height</span>
+                                <span class="ntp-label-help">Pixels — width is auto-scaled to the source's aspect ratio.</span>
+                            </div>
+                            <input id="IframeWidth" type="number" is="emby-input" min="160" max="1920" />
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Thumbnail interval</span>
+                                <span class="ntp-label-help">Seconds between scrubbing thumbnails. <code>1</code> = smoothest scrubbing; raise to <code>5</code> or <code>10</code> if disk space is tight.</span>
+                            </div>
+                            <input id="IframeIntervalSeconds" type="number" is="emby-input" min="1" max="60" step="1" />
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Encoder quality (CRF)</span>
+                                <span class="ntp-label-help">Lower number → higher quality, larger files. <code>18</code>–<code>32</code> typical.</span>
+                            </div>
+                            <input id="IframeCrf" type="number" is="emby-input" min="18" max="40" />
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Cache directory</span>
+                                <span class="ntp-label-help">Absolute path. Leave blank to use Jellyfin's default cache. If you change this, old caches at the previous path are orphaned — delete manually.</span>
+                            </div>
+                            <input id="CacheDirectory" type="text" is="emby-input" placeholder="/var/cache/native-trickplay" />
+                        </div>
+                    </div>
+
+                    <div class="ntp-card">
+                        <div class="ntp-card-header">
+                            <h2 class="ntp-card-title">Pruning</h2>
+                            <span class="ntp-card-subtitle">Runs daily at 3 AM by default · Dashboard → Scheduled Tasks → Native Trickplay</span>
+                        </div>
+
+                        <div class="ntp-form-row toggle">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Remove orphaned caches</span>
+                                <span class="ntp-label-help">Drop cache entries whose item is no longer in the library.</span>
+                            </div>
+                            <label><input id="PruneOrphans" type="checkbox" is="emby-checkbox" /></label>
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Age-based eviction</span>
+                                <span class="ntp-label-help">Delete entries unaccessed for more than N days. <code>0</code> disables.</span>
+                            </div>
+                            <input id="MaxAgeDays" type="number" is="emby-input" min="0" max="3650" />
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Total size cap</span>
+                                <span class="ntp-label-help">Keep total cache below N GB by LRU eviction. <code>0</code> disables.</span>
+                            </div>
+                            <input id="MaxCacheGigabytes" type="number" is="emby-input" min="0" max="10240" />
+                        </div>
+                    </div>
+
+                    <div style="display:flex; justify-content:flex-end; margin-bottom:2em;">
+                        <button is="emby-button" type="submit" class="raised button-submit">
+                            <span>Save settings</span>
+                        </button>
+                    </div>
+                </form>
+
+                <div class="ntp-card">
+                    <div class="ntp-card-header">
+                        <h2 class="ntp-card-title">Cache Status</h2>
+                        <span class="ntp-card-subtitle" id="ntpStatusMeta">Loading…</span>
+                        <span class="ntp-spacer" style="flex:1;"></span>
+                        <button class="ntp-mini-btn" id="ntpRefreshStatusBtn" type="button">Refresh</button>
+                    </div>
+                    <div class="ntp-stat-grid" id="ntpStatTotals" style="margin-bottom:1.5em;"></div>
+                    <div id="ntpLibCoverage" class="ntp-libcoverage"></div>
                 </div>
 
-                <div class="verticalSection">
-                    <h3>Cache pruning</h3>
-                    <p>Runs daily at 3 AM by default; can be triggered manually from Dashboard → Scheduled Tasks → Native Trickplay.</p>
-                </div>
-                <div class="checkboxContainer">
-                    <label>
-                        <input id="PruneOrphans" type="checkbox" is="emby-checkbox" />
-                        <span>Remove caches for deleted/unknown items</span>
-                    </label>
-                </div>
-                <div class="inputContainer">
-                    <label class="inputLabel" for="MaxAgeDays">Age-based eviction: delete after N days unaccessed (0 = disabled)</label>
-                    <input id="MaxAgeDays" type="number" is="emby-input" min="0" max="3650" />
-                </div>
-                <div class="inputContainer">
-                    <label class="inputLabel" for="MaxCacheGigabytes">Size cap: keep total cache under N GB by LRU eviction (0 = disabled)</label>
-                    <input id="MaxCacheGigabytes" type="number" is="emby-input" min="0" max="10240" />
+                <div class="ntp-card" id="ntpProgress" style="display:none;">
+                    <div class="ntp-card-header">
+                        <h2 class="ntp-card-title">Encoding in progress</h2>
+                        <span class="ntp-card-subtitle">Live • polled every 2s</span>
+                    </div>
+                    <div id="ntpProgressList"></div>
                 </div>
 
-                <div>
-                    <button is="emby-button" type="submit" class="raised button-submit block">
-                        <span>Save</span>
-                    </button>
+                <div class="ntp-card">
+                    <div class="ntp-card-header">
+                        <h2 class="ntp-card-title">Bulk: generate a whole library</h2>
+                        <span class="ntp-card-subtitle">Queues every video item — runs in the background</span>
+                    </div>
+                    <div class="ntp-row">
+                        <select id="ntpLibrarySelect" is="emby-select" style="min-width:240px;"></select>
+                        <button is="emby-button" id="ntpGenerateLibraryBtn" type="button" class="raised">
+                            <span>Generate all in library</span>
+                        </button>
+                    </div>
                 </div>
-            </form>
 
-            <hr style="margin: 2em 0;" />
+                <div class="ntp-card">
+                    <div class="ntp-card-header">
+                        <h2 class="ntp-card-title">Find &amp; select items</h2>
+                        <span class="ntp-card-subtitle">Per-item generate, regenerate, and evict</span>
+                    </div>
 
-            <div class="verticalSection">
-                <h2>Cache Management</h2>
-                <p>Inspect cache state and selectively trigger trickplay generation for specific items or whole libraries. Generation runs in the background; once started, scrubbing thumbnails appear as soon as the encode finishes (typically 1–6 minutes per item depending on resolution and source codec).</p>
-            </div>
+                    <div class="ntp-row" style="margin-bottom:0.4em;">
+                        <input id="ntpSearch" is="emby-input" type="text"
+                               placeholder="Search title or series…"
+                               style="min-width:280px; flex:1; max-width:520px;" />
+                        <select id="ntpFilterCached" is="emby-select" title="Cache status filter">
+                            <option value="all">All items</option>
+                            <option value="false">Not cached</option>
+                            <option value="true">Cached</option>
+                        </select>
+                        <select id="ntpSortBy" is="emby-select" title="Sort order">
+                            <option value="recent">Recently added</option>
+                            <option value="name">Title (A → Z)</option>
+                            <option value="name_desc">Title (Z → A)</option>
+                            <option value="series">Series · season · episode</option>
+                            <option value="size">Cache size (largest first)</option>
+                            <option value="size_asc">Cache size (smallest first)</option>
+                            <option value="cached">Cached items first</option>
+                            <option value="uncached">Uncached items first</option>
+                            <option value="runtime">Runtime (longest first)</option>
+                        </select>
+                        <button is="emby-button" id="ntpSearchBtn" type="button" class="raised">
+                            <span>Search</span>
+                        </button>
+                    </div>
+                    <p class="ntp-search-help">
+                        Tokens are AND-matched; matching is case + accent insensitive. Recognized season/episode forms:
+                        <code>elementary S6E18</code>, <code>elementary S7</code>,
+                        <code>1x05</code>, <code>Season 6</code>, <code>Episode 18</code>.
+                    </p>
 
-            <div id="ntpStatus" class="verticalSection" style="opacity:0.7;">Loading status…</div>
-
-            <div id="ntpProgress" class="verticalSection" style="display:none;">
-                <h3>Encoding in progress</h3>
-                <div id="ntpProgressList"></div>
-            </div>
-
-            <div class="verticalSection">
-                <h3>Bulk actions per library</h3>
-                <div style="display:flex; gap:0.5em; flex-wrap:wrap; align-items:center;">
-                    <select id="ntpLibrarySelect" is="emby-select" style="min-width:240px;"></select>
-                    <button is="emby-button" id="ntpGenerateLibraryBtn" type="button" class="raised">
-                        <span>Generate All in Library</span>
-                    </button>
-                    <button is="emby-button" id="ntpRefreshStatusBtn" type="button" class="emby-button">
-                        <span>Refresh Status</span>
-                    </button>
+                    <div class="ntp-row" style="margin: 1em 0 0.5em;">
+                        <label class="ntp-row" style="gap:0.4em;">
+                            <input type="checkbox" id="ntpSelectAll" />
+                            <span>Select all visible</span>
+                        </label>
+                        <span id="ntpResultsMeta" class="ntp-results-meta"></span>
+                        <span class="ntp-spacer" style="flex:1;"></span>
+                        <button is="emby-button" id="ntpGenerateSelectedBtn" type="button" class="raised">
+                            <span>Generate selected</span>
+                        </button>
+                        <button class="ntp-mini-btn ntp-mini-btn-danger" id="ntpEvictSelectedBtn" type="button">Evict selected</button>
+                    </div>
+                    <div id="ntpResults" class="ntp-results"></div>
                 </div>
-            </div>
 
-            <div class="verticalSection">
-                <h3>Find &amp; select items</h3>
-                <div style="display:flex; gap:0.5em; flex-wrap:wrap; align-items:center; margin-bottom:0.5em;">
-                    <input id="ntpSearch" is="emby-input" type="text" placeholder="Search by title…" style="min-width:240px;" />
-                    <select id="ntpFilterCached" is="emby-select">
-                        <option value="all">All</option>
-                        <option value="false">Not cached</option>
-                        <option value="true">Cached</option>
-                    </select>
-                    <button is="emby-button" id="ntpSearchBtn" type="button" class="raised">
-                        <span>Search</span>
-                    </button>
-                </div>
-                <div id="ntpResultsHeader" style="display:flex; gap:0.5em; flex-wrap:wrap; align-items:center; margin-bottom:0.5em;">
-                    <label><input type="checkbox" id="ntpSelectAll" /> Select all visible</label>
-                    <span id="ntpResultsMeta" style="opacity:0.7;"></span>
-                    <span style="flex:1;"></span>
-                    <button is="emby-button" id="ntpGenerateSelectedBtn" type="button" class="raised">
-                        <span>Generate selected</span>
-                    </button>
-                    <button is="emby-button" id="ntpEvictSelectedBtn" type="button" class="emby-button">
-                        <span>Evict selected</span>
-                    </button>
-                </div>
-                <div id="ntpResults" style="border:1px solid rgba(255,255,255,0.1); border-radius:4px; max-height:480px; overflow-y:auto;"></div>
             </div>
         </div>
     </div>
     <script>
         var pluginId = "6911edf0-840d-4a71-965d-1319cbb2efd1";
+
+        // ── Settings form load/save ───────────────────────────────────────
         document.querySelector('#NativeTrickplayConfigPage').addEventListener('pageshow', function () {
             ApiClient.getPluginConfiguration(pluginId).then(function (cfg) {
                 document.querySelector('#Enabled').checked = cfg.Enabled;
@@ -143,6 +301,13 @@
                 document.querySelector('#MaxAgeDays').value = cfg.MaxAgeDays;
                 document.querySelector('#MaxCacheGigabytes').value = cfg.MaxCacheGigabytes;
             });
+            ntpRefreshStatus();
+            ntpStartProgressPolling();
+            // Initial item list render
+            ntpRunSearch();
+        });
+        document.querySelector('#NativeTrickplayConfigPage').addEventListener('pagehide', function () {
+            ntpStopProgressPolling();
         });
         document.querySelector('#NativeTrickplayConfigForm').addEventListener('submit', function (e) {
             e.preventDefault();
@@ -161,54 +326,56 @@
             return false;
         });
 
-        // ── Cache Management ──────────────────────────────────────────────
-        // All endpoints live under /Plugins/NativeTrickplay/* and require
-        // admin auth; ApiClient.fetch carries the access token automatically.
-
+        // ── Cache management API helpers ──────────────────────────────────
         function ntpFetch(path, opts) {
             return ApiClient.fetch(Object.assign({
                 url: ApiClient.getUrl('Plugins/NativeTrickplay/' + path),
                 dataType: 'json'
             }, opts || {}));
         }
-
         function ntpFmtBytes(n) {
             if (n == null) return '';
             var u = ['B','KiB','MiB','GiB','TiB']; var i = 0;
             while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
             return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
         }
-
         function ntpEscape(s) {
             return (s == null ? '' : String(s))
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
+        function ntpFmtElapsed(startedUtcStr, serverUtcStr) {
+            var startedMs = Date.parse(startedUtcStr);
+            var nowMs = Date.parse(serverUtcStr);
+            if (isNaN(startedMs) || isNaN(nowMs)) return '';
+            var sec = Math.max(0, Math.round((nowMs - startedMs) / 1000));
+            var m = Math.floor(sec / 60);
+            return (m > 0 ? m + 'm ' : '') + (sec % 60) + 's';
+        }
 
+        // ── Status panel ──────────────────────────────────────────────────
         function ntpRefreshStatus() {
             return ntpFetch('Status').then(function (s) {
-                var statusEl = document.querySelector('#ntpStatus');
-                statusEl.style.opacity = '1';
-                statusEl.innerHTML =
-                    '<h3>Status</h3>' +
-                    '<p><strong>' + s.CachedItems + '</strong> items cached, ' +
-                    '<strong>' + ntpFmtBytes(s.CachedBytes) + '</strong> on disk.</p>' +
-                    '<table style="border-collapse:collapse; width:100%;">' +
-                    '<thead><tr style="text-align:left; border-bottom:1px solid rgba(255,255,255,0.15);">' +
-                    '<th style="padding:0.4em;">Library</th>' +
-                    '<th style="padding:0.4em;">Cached / Total</th>' +
-                    '<th style="padding:0.4em;">Coverage</th>' +
-                    '</tr></thead><tbody>' +
-                    s.Libraries.map(function (lib) {
-                        var pct = lib.TotalItems > 0 ? Math.round(100 * lib.CachedItems / lib.TotalItems) : 0;
-                        return '<tr><td style="padding:0.4em;">' + ntpEscape(lib.Name) + '</td>' +
-                            '<td style="padding:0.4em;">' + lib.CachedItems + ' / ' + lib.TotalItems + '</td>' +
-                            '<td style="padding:0.4em;">' + pct + '%</td></tr>';
-                    }).join('') +
-                    '</tbody></table>';
+                var libsTotal = s.Libraries.reduce(function (acc, l) { return acc + l.TotalItems; }, 0);
+                document.querySelector('#ntpStatusMeta').textContent =
+                    s.CachedItems + ' of ' + libsTotal + ' items cached · ' + ntpFmtBytes(s.CachedBytes) + ' on disk';
 
-                // Populate library dropdown — only on first call so user
-                // selection persists across refreshes.
+                document.querySelector('#ntpStatTotals').innerHTML =
+                    '<div><div class="ntp-stat-value">' + s.CachedItems + '</div><div class="ntp-stat-label">Cached items</div></div>' +
+                    '<div><div class="ntp-stat-value">' + ntpFmtBytes(s.CachedBytes) + '</div><div class="ntp-stat-label">Cache on disk</div></div>' +
+                    '<div><div class="ntp-stat-value">' + libsTotal + '</div><div class="ntp-stat-label">Library items</div></div>' +
+                    '<div><div class="ntp-stat-value">' + (libsTotal > 0 ? Math.round(100 * s.CachedItems / libsTotal) + '%' : '—') + '</div><div class="ntp-stat-label">Coverage</div></div>';
+
+                var libsHtml = s.Libraries.map(function (lib) {
+                    var pct = lib.TotalItems > 0 ? Math.round(100 * lib.CachedItems / lib.TotalItems) : 0;
+                    return '<div class="ntp-libcoverage-row">' +
+                        '<div>' + ntpEscape(lib.Name) + '</div>' +
+                        '<div class="ntp-libcoverage-bar"><div class="ntp-libcoverage-bar-fill" style="width:' + pct + '%;"></div></div>' +
+                        '<div class="ntp-libcoverage-counts">' + lib.CachedItems + ' / ' + lib.TotalItems + ' · ' + pct + '%</div>' +
+                        '</div>';
+                }).join('');
+                document.querySelector('#ntpLibCoverage').innerHTML = libsHtml || '<div class="ntp-empty">No libraries.</div>';
+
                 var sel = document.querySelector('#ntpLibrarySelect');
                 if (sel.options.length === 0) {
                     s.Libraries.forEach(function (lib) {
@@ -221,43 +388,88 @@
             });
         }
 
+        // ── Progress panel (polls /Progress) ──────────────────────────────
+        var ntpProgressTimer = null;
+        var ntpLastInflightCount = -1;
+        function ntpPollProgress() {
+            return ntpFetch('Progress').then(function (p) {
+                var box = document.querySelector('#ntpProgress');
+                var list = document.querySelector('#ntpProgressList');
+                if (!p.Inflight || p.Inflight.length === 0) {
+                    box.style.display = 'none';
+                    if (ntpLastInflightCount > 0) ntpRefreshStatus();
+                    ntpLastInflightCount = 0;
+                    return;
+                }
+                ntpLastInflightCount = p.Inflight.length;
+                box.style.display = '';
+                list.innerHTML =
+                    '<table class="ntp-table"><thead><tr>' +
+                    '<th>Item</th>' +
+                    '<th style="width:8em;">Status</th>' +
+                    '<th style="width:7em;">Elapsed</th>' +
+                    '<th style="width:9em;">Output</th>' +
+                    '</tr></thead><tbody>' +
+                    p.Inflight.map(function (it) {
+                        var badge = it.Status === 'running'
+                            ? '<span class="ntp-badge ntp-badge-running">▶ running</span>'
+                            : '<span class="ntp-badge ntp-badge-queued">⏸ queued</span>';
+                        return '<tr>' +
+                            '<td>' + ntpEscape(it.ItemName) + '</td>' +
+                            '<td>' + badge + '</td>' +
+                            '<td>' + ntpFmtElapsed(it.StartedUtc, p.ServerUtc) + '</td>' +
+                            '<td>' + (it.PartialBytes ? ntpFmtBytes(it.PartialBytes) : '—') + '</td>' +
+                            '</tr>';
+                    }).join('') + '</tbody></table>';
+            });
+        }
+        function ntpStartProgressPolling() {
+            if (ntpProgressTimer) return;
+            var poll = function () {
+                ntpPollProgress().finally(function () {
+                    var nextDelay = ntpLastInflightCount > 0 ? 2000 : 15000;
+                    ntpProgressTimer = setTimeout(poll, nextDelay);
+                });
+            };
+            poll();
+        }
+        function ntpStopProgressPolling() {
+            if (ntpProgressTimer) { clearTimeout(ntpProgressTimer); ntpProgressTimer = null; }
+        }
+
+        // ── Item search + render ──────────────────────────────────────────
         function ntpRenderItems(resp) {
             var meta = document.querySelector('#ntpResultsMeta');
-            meta.textContent = resp.Items.length + ' shown of ' + resp.Total + ' matching items';
-            var html = '';
+            meta.textContent = resp.Items.length + ' shown · ' + resp.Total + ' total';
             if (resp.Items.length === 0) {
-                html = '<div style="padding:1em; opacity:0.6;">No items match the current filter.</div>';
-            } else {
-                html = '<table style="border-collapse:collapse; width:100%;">' +
-                    '<thead><tr style="text-align:left; position:sticky; top:0; background:rgba(0,0,0,0.6); border-bottom:1px solid rgba(255,255,255,0.15);">' +
-                    '<th style="padding:0.4em; width:2.5em;"></th>' +
-                    '<th style="padding:0.4em;">Title</th>' +
-                    '<th style="padding:0.4em; width:9em;">Cache</th>' +
-                    '<th style="padding:0.4em; width:14em;">Actions</th>' +
-                    '</tr></thead><tbody>' +
-                    resp.Items.map(function (it) {
-                        var title = ntpEscape(it.Name);
-                        if (it.SeriesName) {
-                            title = ntpEscape(it.SeriesName) + ' · S' + (it.SeasonNumber ?? '?') +
-                                'E' + (it.EpisodeNumber ?? '?') + ' · ' + title;
-                        }
-                        var status = it.Cached
-                            ? '<span style="color:#5cb85c;">✓ ' + ntpFmtBytes(it.CacheSizeBytes) + '</span>'
-                            : '<span style="opacity:0.6;">—</span>';
-                        return '<tr data-item-id="' + it.Id + '" style="border-bottom:1px solid rgba(255,255,255,0.05);">' +
-                            '<td style="padding:0.4em;"><input type="checkbox" class="ntpItemCheck" value="' + it.Id + '" /></td>' +
-                            '<td style="padding:0.4em;">' + title + '</td>' +
-                            '<td style="padding:0.4em;">' + status + '</td>' +
-                            '<td style="padding:0.4em;">' +
-                                '<button is="emby-button" type="button" class="emby-button ntpRowGenerate" data-id="' + it.Id + '"><span>' +
-                                    (it.Cached ? 'Regenerate' : 'Generate') + '</span></button> ' +
-                                (it.Cached ? '<button is="emby-button" type="button" class="emby-button ntpRowEvict" data-id="' + it.Id + '"><span>Evict</span></button>' : '') +
-                            '</td></tr>';
-                    }).join('') +
-                    '</tbody></table>';
+                document.querySelector('#ntpResults').innerHTML = '<div class="ntp-empty">No items match the current filter.</div>';
+                return;
             }
+            var html = '<table class="ntp-table"><thead><tr>' +
+                '<th style="width:2.5em;"></th>' +
+                '<th>Title</th>' +
+                '<th style="width:8em;">Cache</th>' +
+                '<th style="width:14em;">Actions</th>' +
+                '</tr></thead><tbody>' +
+                resp.Items.map(function (it) {
+                    var title = ntpEscape(it.Name);
+                    if (it.SeriesName) {
+                        title = '<strong>' + ntpEscape(it.SeriesName) + '</strong> · S' + (it.SeasonNumber ?? '?') +
+                            'E' + (it.EpisodeNumber ?? '?') + ' · ' + ntpEscape(it.Name);
+                    }
+                    var status = it.Cached
+                        ? '<span class="ntp-badge ntp-badge-cached">✓ ' + ntpFmtBytes(it.CacheSizeBytes) + '</span>'
+                        : '<span class="ntp-badge ntp-badge-uncached">— not cached</span>';
+                    return '<tr data-item-id="' + it.Id + '">' +
+                        '<td><input type="checkbox" class="ntpItemCheck" value="' + it.Id + '" /></td>' +
+                        '<td>' + title + '</td>' +
+                        '<td>' + status + '</td>' +
+                        '<td class="ntp-actions-cell">' +
+                            '<button class="ntp-mini-btn ntpRowGenerate" data-id="' + it.Id + '" type="button">' + (it.Cached ? 'Regenerate' : 'Generate') + '</button>' +
+                            (it.Cached ? '<button class="ntp-mini-btn ntp-mini-btn-danger ntpRowEvict" data-id="' + it.Id + '" type="button">Evict</button>' : '') +
+                        '</td></tr>';
+                }).join('') + '</tbody></table>';
             document.querySelector('#ntpResults').innerHTML = html;
-            // Wire per-row buttons
             document.querySelectorAll('.ntpRowGenerate').forEach(function (b) {
                 b.addEventListener('click', function () { ntpAct('Generate', [b.dataset.id]); });
             });
@@ -265,15 +477,16 @@
                 b.addEventListener('click', function () { ntpAct('Evict', [b.dataset.id]); });
             });
         }
-
         function ntpRunSearch() {
             var search = document.querySelector('#ntpSearch').value.trim();
             var cached = document.querySelector('#ntpFilterCached').value;
-            var qs = 'cached=' + encodeURIComponent(cached) + '&limit=200';
+            var sort = document.querySelector('#ntpSortBy').value;
+            var qs = 'cached=' + encodeURIComponent(cached) +
+                     '&sort=' + encodeURIComponent(sort) +
+                     '&limit=200';
             if (search) qs += '&search=' + encodeURIComponent(search);
             return ntpFetch('Items?' + qs).then(ntpRenderItems);
         }
-
         function ntpAct(verb, ids) {
             if (!ids || ids.length === 0) {
                 Dashboard.alert('Select at least one item first.');
@@ -285,93 +498,24 @@
                 data: JSON.stringify({ ItemIds: ids })
             }).then(function (r) {
                 var label = verb === 'Generate' ? 'queued' : 'evicted';
-                Dashboard.alert(r[verb === 'Generate' ? 'Queued' : 'Queued'] + ' items ' + label +
+                Dashboard.alert(r.Queued + ' items ' + label +
                     (r.Skipped > 0 ? ', ' + r.Skipped + ' skipped' : ''));
                 ntpRefreshStatus();
                 if (verb === 'Evict') ntpRunSearch();
             });
         }
-
         function ntpSelectedIds() {
             return Array.from(document.querySelectorAll('.ntpItemCheck:checked')).map(function (c) { return c.value; });
         }
 
-        // Progress polling — runs every 2s while there's anything encoding,
-        // pauses to a slow 15s heartbeat once idle. Stops entirely when the
-        // user navigates away from the config page.
-        var ntpProgressTimer = null;
-        var ntpLastInflightCount = -1;
-        function ntpFmtElapsed(startedUtcStr, serverUtcStr) {
-            var startedMs = Date.parse(startedUtcStr);
-            var nowMs = Date.parse(serverUtcStr);
-            if (isNaN(startedMs) || isNaN(nowMs)) return '';
-            var sec = Math.max(0, Math.round((nowMs - startedMs) / 1000));
-            var m = Math.floor(sec / 60);
-            return (m > 0 ? m + 'm ' : '') + (sec % 60) + 's';
-        }
-        function ntpPollProgress() {
-            return ntpFetch('Progress').then(function (p) {
-                var box = document.querySelector('#ntpProgress');
-                var list = document.querySelector('#ntpProgressList');
-                if (!p.Inflight || p.Inflight.length === 0) {
-                    box.style.display = 'none';
-                    // If we just transitioned from "had encodes" to "none",
-                    // refresh the status panel so the cached counts update.
-                    if (ntpLastInflightCount > 0) {
-                        ntpLastInflightCount = 0;
-                        ntpRefreshStatus();
-                    }
-                    ntpLastInflightCount = 0;
-                    return;
-                }
-                ntpLastInflightCount = p.Inflight.length;
-                box.style.display = '';
-                list.innerHTML =
-                    '<table style="border-collapse:collapse; width:100%;">' +
-                    '<thead><tr style="text-align:left; border-bottom:1px solid rgba(255,255,255,0.15);">' +
-                    '<th style="padding:0.4em;">Item</th>' +
-                    '<th style="padding:0.4em; width:7em;">Status</th>' +
-                    '<th style="padding:0.4em; width:7em;">Elapsed</th>' +
-                    '<th style="padding:0.4em; width:9em;">Output</th>' +
-                    '</tr></thead><tbody>' +
-                    p.Inflight.map(function (it) {
-                        var statusBadge = it.Status === 'running'
-                            ? '<span style="color:#5cb85c;">▶ running</span>'
-                            : '<span style="opacity:0.7;">⏸ queued</span>';
-                        return '<tr>' +
-                            '<td style="padding:0.4em;">' + ntpEscape(it.ItemName) + '</td>' +
-                            '<td style="padding:0.4em;">' + statusBadge + '</td>' +
-                            '<td style="padding:0.4em;">' + ntpFmtElapsed(it.StartedUtc, p.ServerUtc) + '</td>' +
-                            '<td style="padding:0.4em;">' + (it.PartialBytes ? ntpFmtBytes(it.PartialBytes) : '—') + '</td>' +
-                            '</tr>';
-                    }).join('') + '</tbody></table>';
-            });
-        }
-        function ntpStartProgressPolling() {
-            if (ntpProgressTimer) return;
-            var poll = function () {
-                ntpPollProgress().finally(function () {
-                    // Tight loop while encoding, slow heartbeat when idle
-                    var nextDelay = ntpLastInflightCount > 0 ? 2000 : 15000;
-                    ntpProgressTimer = setTimeout(poll, nextDelay);
-                });
-            };
-            poll();
-        }
-        function ntpStopProgressPolling() {
-            if (ntpProgressTimer) { clearTimeout(ntpProgressTimer); ntpProgressTimer = null; }
-        }
-
-        document.querySelector('#NativeTrickplayConfigPage').addEventListener('pageshow', function () {
-            ntpRefreshStatus();
-            ntpStartProgressPolling();
-        });
-        document.querySelector('#NativeTrickplayConfigPage').addEventListener('pagehide', ntpStopProgressPolling);
+        // ── Wire up all UI events ─────────────────────────────────────────
         document.querySelector('#ntpRefreshStatusBtn').addEventListener('click', ntpRefreshStatus);
         document.querySelector('#ntpSearchBtn').addEventListener('click', ntpRunSearch);
         document.querySelector('#ntpSearch').addEventListener('keydown', function (e) {
             if (e.key === 'Enter') { e.preventDefault(); ntpRunSearch(); }
         });
+        document.querySelector('#ntpFilterCached').addEventListener('change', ntpRunSearch);
+        document.querySelector('#ntpSortBy').addEventListener('change', ntpRunSearch);
         document.querySelector('#ntpSelectAll').addEventListener('change', function (e) {
             document.querySelectorAll('.ntpItemCheck').forEach(function (c) { c.checked = e.target.checked; });
         });
@@ -390,7 +534,8 @@
                 data: JSON.stringify({ LibraryId: libId })
             }).then(function (r) {
                 Dashboard.alert(r.Queued + ' items queued for generation' +
-                    (r.Skipped > 0 ? ' (' + r.Skipped + ' skipped)' : '') + '. They will be encoded in the background.');
+                    (r.Skipped > 0 ? ' (' + r.Skipped + ' skipped)' : '') +
+                    '. They will be encoded in the background.');
                 ntpRefreshStatus();
             });
         });
