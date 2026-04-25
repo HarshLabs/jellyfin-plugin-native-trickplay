@@ -224,11 +224,46 @@
 
     /* Results toolbar visually attached to the table */
     #NativeTrickplayConfigPage .ntp-results-card {
+        position: relative;
         margin-top: 1.25em;
         border: 1px solid rgba(127,127,127,0.18);
         border-radius: 10px;
         overflow: hidden;
         background: rgba(127,127,127,0.04);
+    }
+    /* Indeterminate top progress bar while a fetch is in flight.
+       Pinned to the card's top edge, animates a blue shimmer back
+       and forth so the user knows the table is updating. */
+    #NativeTrickplayConfigPage .ntp-results-card .ntp-loading-bar {
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 2px;
+        overflow: hidden;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 150ms ease;
+        z-index: 5;
+    }
+    #NativeTrickplayConfigPage .ntp-results-card.loading .ntp-loading-bar { opacity: 1; }
+    #NativeTrickplayConfigPage .ntp-results-card .ntp-loading-bar::after {
+        content: "";
+        position: absolute; inset: 0;
+        background: linear-gradient(90deg,
+            transparent 0%,
+            rgba(10, 132, 255, 0) 20%,
+            rgba(10, 132, 255, 0.95) 50%,
+            rgba(10, 132, 255, 0) 80%,
+            transparent 100%);
+        animation: ntpShimmer 1.2s linear infinite;
+    }
+    /* Dim the table contents during fetch so it's obvious results
+       are stale, but keep them visible (no flash-of-blank-content). */
+    #NativeTrickplayConfigPage .ntp-results-card.loading .ntp-results {
+        opacity: 0.55;
+        transition: opacity 150ms ease;
+    }
+    #NativeTrickplayConfigPage .ntp-results-card .ntp-results {
+        transition: opacity 150ms ease;
     }
     #NativeTrickplayConfigPage .ntp-results-toolbar {
         display: flex; align-items: center; gap: 0.75em; flex-wrap: wrap;
@@ -729,6 +764,7 @@
                     </div>
 
                     <div class="ntp-results-card">
+                        <div class="ntp-loading-bar" aria-hidden="true"></div>
                         <div class="ntp-results-toolbar">
                             <label>
                                 <input type="checkbox" class="ntp-checkbox" id="ntpSelectAll" />
@@ -1137,6 +1173,16 @@
                 b.addEventListener('click', function () { ntpAct('Evict', [b.dataset.id], b); });
             });
         }
+        // Loading-state ref-counter so overlapping searches don't
+        // flicker the bar off mid-fetch.
+        var ntpInflightSearches = 0;
+        function ntpSetSearchLoading(on) {
+            var card = document.querySelector('.ntp-results-card');
+            if (!card) return;
+            ntpInflightSearches = on ? (ntpInflightSearches + 1) : Math.max(0, ntpInflightSearches - 1);
+            if (ntpInflightSearches > 0) card.classList.add('loading');
+            else card.classList.remove('loading');
+        }
         function ntpRunSearch() {
             var search = document.querySelector('#ntpSearch').value.trim();
             var cached = document.querySelector('#ntpFilterCached').value;
@@ -1145,7 +1191,10 @@
                      '&sort=' + encodeURIComponent(sort) +
                      '&limit=200';
             if (search) qs += '&search=' + encodeURIComponent(search);
-            return ntpFetch('Items?' + qs).then(ntpRenderItems);
+            ntpSetSearchLoading(true);
+            return ntpFetch('Items?' + qs)
+                .then(ntpRenderItems)
+                .finally(function () { ntpSetSearchLoading(false); });
         }
         function ntpAct(verb, ids, btn) {
             if (!ids || ids.length === 0) {
