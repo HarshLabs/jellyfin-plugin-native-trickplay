@@ -681,6 +681,14 @@
                             <input id="MaxConcurrentGenerations" type="number" class="ntp-input" min="1" max="8" />
                         </div>
 
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Warmup delay (seconds)</span>
+                                <span class="ntp-label-help">After playback starts, wait this long before kicking off the iframe encoder. The defer prevents the heavy decode+tonemap ffmpeg from racing Jellyfin's own playback ffmpeg startup. <code>30</code> is the safe default; <code>10</code>–<code>15</code> is fine on fast hardware (Apple Silicon, NVMe). Range <code>5</code>–<code>300</code>.</span>
+                            </div>
+                            <input id="WarmupDelaySeconds" type="number" class="ntp-input" min="5" max="300" />
+                        </div>
+
                         <div class="ntp-form-row toggle">
                             <div class="ntp-label">
                                 <span class="ntp-label-name">Resume interrupted encodes</span>
@@ -841,6 +849,7 @@
                 document.querySelector('#IframeCrf').value = cfg.IframeCrf;
                 document.querySelector('#IframeIntervalSeconds').value = cfg.IframeIntervalSeconds;
                 document.querySelector('#MaxConcurrentGenerations').value = cfg.MaxConcurrentGenerations;
+                document.querySelector('#WarmupDelaySeconds').value = (cfg.WarmupDelaySeconds && cfg.WarmupDelaySeconds > 0) ? cfg.WarmupDelaySeconds : 30;
                 document.querySelector('#ResumeInterruptedEncodesOnStartup').checked = cfg.ResumeInterruptedEncodesOnStartup !== false;
                 document.querySelector('#UseHardwareDecoding').checked = cfg.UseHardwareDecoding;
                 document.querySelector('#CacheDirectory').value = cfg.CacheDirectory || '';
@@ -863,6 +872,7 @@
                 cfg.IframeCrf = parseInt(document.querySelector('#IframeCrf').value, 10);
                 cfg.IframeIntervalSeconds = parseFloat(document.querySelector('#IframeIntervalSeconds').value);
                 cfg.MaxConcurrentGenerations = Math.max(1, Math.min(8, parseInt(document.querySelector('#MaxConcurrentGenerations').value, 10) || 1));
+                cfg.WarmupDelaySeconds = Math.max(5, Math.min(300, parseInt(document.querySelector('#WarmupDelaySeconds').value, 10) || 30));
                 cfg.ResumeInterruptedEncodesOnStartup = document.querySelector('#ResumeInterruptedEncodesOnStartup').checked;
                 cfg.UseHardwareDecoding = document.querySelector('#UseHardwareDecoding').checked;
                 cfg.CacheDirectory = (document.querySelector('#CacheDirectory').value || '').trim();
@@ -939,11 +949,23 @@
         var ntpBusyRowIds = new Set();
         var ntpRowFinishedTimer = null;
 
+        function ntpComputePercent(state) {
+            // Cap at 99 so the bar never shows 100% before the encode
+            // actually finishes — the estimate can undershoot, especially
+            // on high-detail content.
+            if (!state.PartialBytes || !state.EstimatedTotalBytes || state.EstimatedTotalBytes <= 0) return null;
+            var raw = (state.PartialBytes / state.EstimatedTotalBytes) * 100;
+            return Math.max(0, Math.min(99, Math.round(raw)));
+        }
+
         function ntpBuildBusyCell(state) {
-            // state = { Status, PartialBytes, StartedUtc, ServerUtc }
-            var badge = state.Status === 'running'
-                ? '<span class="ntp-badge ntp-badge-running">▶ encoding</span>'
-                : '<span class="ntp-badge ntp-badge-queued">⏸ queued</span>';
+            // state = { Status, PartialBytes, EstimatedTotalBytes, StartedUtc, ServerUtc }
+            var pct = ntpComputePercent(state);
+            var badgeText = state.Status === 'running'
+                ? (pct !== null ? '▶ encoding · ' + pct + '%' : '▶ encoding')
+                : '⏸ queued';
+            var badgeClass = state.Status === 'running' ? 'ntp-badge-running' : 'ntp-badge-queued';
+            var badge = '<span class="ntp-badge ' + badgeClass + '">' + badgeText + '</span>';
             var meta = '';
             if (state.Status === 'running') {
                 var pieces = [];
@@ -1013,6 +1035,7 @@
                     ntpApplyRowBusy(tr, {
                         Status: inflight.Status,
                         PartialBytes: inflight.PartialBytes,
+                        EstimatedTotalBytes: inflight.EstimatedTotalBytes,
                         StartedUtc: inflight.StartedUtc,
                         ServerUtc: p.ServerUtc,
                     });
@@ -1185,16 +1208,21 @@
                     '<th style="width:8em;">Status</th>' +
                     '<th style="width:7em;">Elapsed</th>' +
                     '<th style="width:9em;">Output</th>' +
+                    '<th style="width:6em;">Progress</th>' +
                     '</tr></thead><tbody>' +
                     visible.map(function (it) {
-                        var badge = it.Status === 'running'
-                            ? '<span class="ntp-badge ntp-badge-running">▶ running</span>'
-                            : '<span class="ntp-badge ntp-badge-queued">⏸ queued</span>';
+                        var pct = ntpComputePercent(it);
+                        var badgeText = it.Status === 'running'
+                            ? (pct !== null ? '▶ running · ' + pct + '%' : '▶ running')
+                            : '⏸ queued';
+                        var badgeClass = it.Status === 'running' ? 'ntp-badge-running' : 'ntp-badge-queued';
+                        var badge = '<span class="ntp-badge ' + badgeClass + '">' + badgeText + '</span>';
                         return '<tr>' +
                             '<td>' + ntpEscape(it.ItemName) + '</td>' +
                             '<td>' + badge + '</td>' +
                             '<td>' + (it.Status === 'running' ? ntpFmtElapsed(it.StartedUtc, p.ServerUtc) : '—') + '</td>' +
                             '<td>' + (it.PartialBytes ? ntpFmtBytes(it.PartialBytes) : '—') + '</td>' +
+                            '<td>' + (pct !== null ? pct + '%' : '—') + '</td>' +
                             '</tr>';
                     }).join('') + '</tbody></table>';
 

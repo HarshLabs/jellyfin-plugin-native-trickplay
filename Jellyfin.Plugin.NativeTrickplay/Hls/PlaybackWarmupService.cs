@@ -24,15 +24,16 @@ namespace Jellyfin.Plugin.NativeTrickplay.Hls;
 public sealed class PlaybackWarmupService : IHostedService, IDisposable
 {
     /// <summary>
-    /// Delay between the PlaybackStart event firing and the iframe encoder
-    /// actually launching. Long enough that AVPlayer / Jellyfin have completed
-    /// the cold-start dance: PlaybackInfo response, master.m3u8, main.m3u8,
-    /// init segment, and the first 1–2 media segments. After that, the segment
-    /// ffmpeg is steady-state and isn't fragile to a parallel heavy encode
-    /// starting up. 30 seconds is well past every measured cold-start in
-    /// real-world testing on 4K HDR sources.
+    /// Reads the configured warmup delay (`WarmupDelaySeconds`), clamping to
+    /// [5, 300]s defensively in case the user enters something out of range.
+    /// Default 30 — see PluginConfiguration.WarmupDelaySeconds for rationale.
     /// </summary>
-    private static readonly TimeSpan WarmupDelay = TimeSpan.FromSeconds(30);
+    private static TimeSpan GetWarmupDelay()
+    {
+        var seconds = Plugin.Instance?.Configuration.WarmupDelaySeconds ?? 30;
+        seconds = Math.Clamp(seconds, 5, 300);
+        return TimeSpan.FromSeconds(seconds);
+    }
 
     private readonly ISessionManager _sessionManager;
     private readonly IframeAssetCache _cache;
@@ -85,9 +86,10 @@ public sealed class PlaybackWarmupService : IHostedService, IDisposable
 
         var itemId = e.Item.Id;
         var name = e.Item.Name ?? "(unnamed)";
+        var delay = GetWarmupDelay();
         _logger.LogInformation(
             "[NativeTrickplay] warmup scheduled for {Id} ({Name}) — deferred {Delay}s so it doesn't compete with Jellyfin's segment ffmpeg startup",
-            itemId, name, (int)WarmupDelay.TotalSeconds);
+            itemId, name, (int)delay.TotalSeconds);
 
         // Fire-and-forget. _shutdownCts ensures pending warmups stop firing
         // when the plugin is unloaded; the cache itself uses a separate
@@ -97,7 +99,7 @@ public sealed class PlaybackWarmupService : IHostedService, IDisposable
         {
             try
             {
-                await Task.Delay(WarmupDelay, _shutdownCts.Token).ConfigureAwait(false);
+                await Task.Delay(delay, _shutdownCts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
