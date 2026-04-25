@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
@@ -79,8 +80,9 @@ public sealed class IframeAssetCache
     }
 
     /// <summary>
-    /// Synchronous, no-side-effect check: is the asset already on disk and fresh
-    /// (mtime matches)? Returns the asset or null. Used by the controller hot path
+    /// Synchronous, no-side-effect check: is the asset already on disk, fresh
+    /// (mtime matches), AND encoded in the format the current source range
+    /// requires? Returns the asset or null. Used by the controller hot path
     /// so that fully-cached items respond in &lt; 1 ms with no generation work.
     /// </summary>
     public IframeAsset? TryGetCached(Guid itemId)
@@ -99,9 +101,18 @@ public sealed class IframeAssetCache
         try
         {
             var sourceMtime = File.GetLastWriteTimeUtc(item.Path);
-            if (!long.TryParse(File.ReadAllText(stampPath), NumberStyles.Integer, CultureInfo.InvariantCulture, out var stamped)
-                || stamped != sourceMtime.Ticks)
+            var stampContent = File.ReadAllText(stampPath);
+            if (!ParseStamp(stampContent, out var stampedMtime, out var stampedEncoder)
+                || stampedMtime != sourceMtime.Ticks)
                 return null;
+
+            // Encoder must match the variant we'd produce now for this source —
+            // catches v1.0→v1.1 upgrade where HDR items have stale SDR caches,
+            // or any future format change.
+            var expectedEncoder = IframeFormat.EncoderTag(IframeFormatFor(item));
+            if (!string.Equals(stampedEncoder, expectedEncoder, StringComparison.Ordinal))
+                return null;
+
             var template = File.ReadAllText(playlistPath);
             return new IframeAsset(template, segmentPath);
         }
@@ -110,6 +121,39 @@ public sealed class IframeAssetCache
             return null;
         }
     }
+
+    /// <summary>
+    /// What I-frame variant should we encode/advertise for this item, based on
+    /// its primary video stream's color range? Single source of truth used by
+    /// both the cache (encoder selection) and the playlist injector
+    /// (codec/VIDEO-RANGE declaration).
+    /// </summary>
+    internal IframeVariant IframeFormatFor(BaseItem item)
+    {
+        var ms = item.GetMediaSources(false)?.Count > 0 ? item.GetMediaSources(false)[0] : null;
+        var video = ms?.MediaStreams?.FirstOrDefault(s => s.Type == MediaStreamType.Video);
+        return video is null ? IframeVariant.Sdr : IframeFormat.FromVideoRange(video.VideoRangeType);
+    }
+
+    /// <summary>
+    /// Stamp file format: "&lt;mtime-ticks&gt;:&lt;encoder-tag&gt;". Old v1.0
+    /// stamps contain only the ticks (no colon) and parse as invalid here —
+    /// natural cache invalidation on upgrade.
+    /// </summary>
+    private static bool ParseStamp(string content, out long mtimeTicks, out string encoder)
+    {
+        mtimeTicks = 0;
+        encoder = string.Empty;
+        var colon = content.IndexOf(':');
+        if (colon <= 0) return false;
+        if (!long.TryParse(content.AsSpan(0, colon), NumberStyles.Integer, CultureInfo.InvariantCulture, out mtimeTicks))
+            return false;
+        encoder = content[(colon + 1)..].Trim();
+        return encoder.Length > 0;
+    }
+
+    private static string FormatStamp(long mtimeTicks, string encoder) =>
+        string.Create(CultureInfo.InvariantCulture, $"{mtimeTicks}:{encoder}");
 
     /// <summary>
     /// Fire-and-forget warmup. Idempotent under concurrency thanks to the
@@ -202,6 +246,8 @@ public sealed class IframeAssetCache
 
         var sourcePath = item.Path;
         var sourceMtime = File.GetLastWriteTimeUtc(sourcePath);
+        var variant = IframeFormatFor(item);
+        var encoderTag = IframeFormat.EncoderTag(variant);
 
         var dir = Path.Combine(GetCacheRoot(), itemId.ToString("N"));
         Directory.CreateDirectory(dir);
@@ -210,13 +256,17 @@ public sealed class IframeAssetCache
         var segmentPath = Path.Combine(dir, "iframe.m4s");
         var stampPath = Path.Combine(dir, ".source-mtime");
 
-        // Fast path: already cached and fresh.
-        if (File.Exists(playlistPath) && File.Exists(segmentPath) && File.Exists(stampPath)
-            && long.TryParse(await File.ReadAllTextAsync(stampPath, ct).ConfigureAwait(false),
-                             NumberStyles.Integer, CultureInfo.InvariantCulture, out var stamped)
-            && stamped == sourceMtime.Ticks)
+        // Fast path: already cached, fresh, and encoded in the right format.
+        if (File.Exists(playlistPath) && File.Exists(segmentPath) && File.Exists(stampPath))
         {
-            return new IframeAsset(await File.ReadAllTextAsync(playlistPath, ct).ConfigureAwait(false), segmentPath);
+            var stampContent = await File.ReadAllTextAsync(stampPath, ct).ConfigureAwait(false);
+            if (ParseStamp(stampContent, out var stampedMtime, out var stampedEncoder)
+                && stampedMtime == sourceMtime.Ticks
+                && stampedEncoder == encoderTag)
+            {
+                return new IframeAsset(
+                    await File.ReadAllTextAsync(playlistPath, ct).ConfigureAwait(false), segmentPath);
+            }
         }
 
         await _globalLimit.WaitAsync(ct).ConfigureAwait(false);
@@ -225,7 +275,7 @@ public sealed class IframeAssetCache
             var tmpSegmentPath = segmentPath + ".tmp";
             if (File.Exists(tmpSegmentPath)) File.Delete(tmpSegmentPath);
 
-            await RunFfmpegAsync(sourcePath, tmpSegmentPath, ct).ConfigureAwait(false);
+            await RunFfmpegAsync(sourcePath, tmpSegmentPath, variant, ct).ConfigureAwait(false);
 
             var (initSize, fragments) = Mp4BoxScanner.Scan(tmpSegmentPath);
             if (fragments.Count == 0)
@@ -238,10 +288,12 @@ public sealed class IframeAssetCache
 
             File.Move(tmpSegmentPath, segmentPath, overwrite: true);
             await File.WriteAllTextAsync(playlistPath, template, ct).ConfigureAwait(false);
-            await File.WriteAllTextAsync(stampPath, sourceMtime.Ticks.ToString(CultureInfo.InvariantCulture), ct)
+            await File.WriteAllTextAsync(stampPath, FormatStamp(sourceMtime.Ticks, encoderTag), ct)
                 .ConfigureAwait(false);
 
-            _logger.LogInformation("[NativeTrickplay] generated {Frames} I-frames for {ItemId}", fragments.Count, itemId);
+            _logger.LogInformation(
+                "[NativeTrickplay] generated {Frames} {Variant} I-frames for {ItemId}",
+                fragments.Count, encoderTag, itemId);
             return new IframeAsset(template, segmentPath);
         }
         finally
@@ -250,7 +302,7 @@ public sealed class IframeAssetCache
         }
     }
 
-    private async Task RunFfmpegAsync(string inputPath, string outputPath, CancellationToken ct)
+    private async Task RunFfmpegAsync(string inputPath, string outputPath, IframeVariant variant, CancellationToken ct)
     {
         var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
@@ -261,7 +313,7 @@ public sealed class IframeAssetCache
         try
         {
             await RunProcessAsync(_encoder.EncoderPath,
-                BuildFfmpegArgs(cfg, inputPath, outputPath, hwaccelArgs), ct).ConfigureAwait(false);
+                BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs), ct).ConfigureAwait(false);
             return;
         }
         catch (InvalidOperationException ex)
@@ -278,13 +330,13 @@ public sealed class IframeAssetCache
         }
 
         await RunProcessAsync(_encoder.EncoderPath,
-            BuildFfmpegArgs(cfg, inputPath, outputPath, hwaccelArgs: null), ct).ConfigureAwait(false);
+            BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs: null), ct).ConfigureAwait(false);
     }
 
     private static List<string> BuildFfmpegArgs(
-        PluginConfiguration cfg, string inputPath, string outputPath, IReadOnlyList<string>? hwaccelArgs)
+        PluginConfiguration cfg, string inputPath, string outputPath, IframeVariant variant, IReadOnlyList<string>? hwaccelArgs)
     {
-        var args = new List<string>(32)
+        var args = new List<string>(48)
         {
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
         };
@@ -292,10 +344,9 @@ public sealed class IframeAssetCache
         // Hardware decode args go BEFORE -i. With bare `-hwaccel <type>` (no
         // `-hwaccel_output_format`), ffmpeg auto-transfers decoded frames from
         // GPU to system memory in their native CPU pixel format (nv12 for 8-bit,
-        // p010 for 10-bit) — the libx264 software encoder + the scale/format
-        // CPU filter chain consume them directly. This mirrors Jellyfin's own
-        // GetSwVidFilterChain "copy-back" path. See
-        // MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs.
+        // p010 for 10-bit) — the software encoder + the scale/format CPU filter
+        // chain consume them directly. Mirrors Jellyfin's GetSwVidFilterChain
+        // "copy-back" path.
         if (hwaccelArgs is { Count: > 0 }) args.AddRange(hwaccelArgs);
 
         var width = cfg.IframeWidth.ToString(CultureInfo.InvariantCulture);
@@ -306,12 +357,45 @@ public sealed class IframeAssetCache
             "-i", inputPath,
             "-an", "-sn",
             "-fps_mode", "passthrough",
-            "-vf", $"scale=-2:{width},format=yuv420p",
-            "-c:v", "libx264",
-            "-preset", cfg.IframePreset,
-            "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
-            "-profile:v", "main", "-level:v", "3.0",
-            "-x264-params", "keyint=1:scenecut=0:open-gop=0",
+        });
+
+        if (variant == IframeVariant.Sdr)
+        {
+            // SDR: 8-bit H.264 Main 3.0. Universal Apple TV decode, fast encode.
+            args.AddRange(new[]
+            {
+                "-vf", $"scale=-2:{width},format=yuv420p",
+                "-c:v", "libx264",
+                "-preset", cfg.IframePreset,
+                "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
+                "-profile:v", "main", "-level:v", "3.0",
+                "-x264-params", "keyint=1:scenecut=0:open-gop=0",
+            });
+        }
+        else
+        {
+            // HDR: 10-bit HEVC Main10 with PQ or HLG signaling so AVPlayer
+            // accepts the I-frame variant alongside HDR primaries (Apple HLS
+            // Authoring Spec §4.4.4 — variant VIDEO-RANGE must match family).
+            // -tag:v hvc1 is critical: Apple players only honor `hvc1`-tagged
+            // HEVC; `hev1` (in-band parameter sets) won't initialize the decoder.
+            var transfer = variant == IframeVariant.HdrHlg ? "arib-std-b67" : "smpte2084";
+            var hdrFlag = variant == IframeVariant.HdrPq ? ":hdr10=1" : string.Empty;
+            args.AddRange(new[]
+            {
+                "-vf", $"scale=-2:{width},format=yuv420p10le",
+                "-c:v", "libx265",
+                "-preset", cfg.IframePreset,
+                "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
+                "-profile:v", "main10", "-level:v", "5.0",
+                "-tag:v", "hvc1",
+                "-x265-params",
+                $"colorprim=bt2020:transfer={transfer}:colormatrix=bt2020nc{hdrFlag}:repeat-headers=1:keyint=1:scenecut=0:open-gop=0:log-level=error",
+            });
+        }
+
+        args.AddRange(new[]
+        {
             "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
             "-f", "mp4", outputPath
         });
