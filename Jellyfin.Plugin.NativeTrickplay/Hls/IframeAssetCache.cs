@@ -526,13 +526,31 @@ public sealed class IframeAssetCache
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
         };
 
-        // Hardware decode args go BEFORE -i. With bare `-hwaccel <type>` (no
-        // `-hwaccel_output_format`), ffmpeg auto-transfers decoded frames from
-        // GPU to system memory in their native CPU pixel format (nv12 for 8-bit,
-        // p010 for 10-bit) — the software encoder + the scale/format CPU filter
-        // chain consume them directly. Mirrors Jellyfin's GetSwVidFilterChain
-        // "copy-back" path.
+        // Hardware decode args go BEFORE -i.
         if (hwaccelArgs is { Count: > 0 }) args.AddRange(hwaccelArgs);
+
+        // VideoToolbox auto-transfers decoded frames to CPU memory when no
+        // -hwaccel_output_format is specified, so a CPU filter chain works
+        // out of the box. QSV / VAAPI / CUDA / D3D11VA do NOT auto-transfer:
+        // their decoder leaves frames in GPU memory in a hardware pixel
+        // format. The first CPU-only filter (`fps`) then can't bridge to
+        // them and ffmpeg fails with:
+        //   "Impossible to convert between the formats supported by the
+        //    filter 'Parsed_fps_0' and the filter 'auto_scale_0'"
+        //
+        // Fix: explicitly download GPU frames to CPU memory at the START
+        // of the filter chain via `hwdownload,format=nv12|p010le`. The
+        // alternation accepts either 8-bit (nv12) or 10-bit (p010le)
+        // hardware output formats so we don't lose source bit depth before
+        // tonemap. Skip for VideoToolbox where bare `-hwaccel` already
+        // produces CPU frames — adding hwdownload there would fail because
+        // there's nothing on the GPU side to download.
+        var needsHwdownload = hwaccelArgs is { Count: > 0 } && (
+            hwaccelArgs.Contains("qsv") ||
+            hwaccelArgs.Contains("vaapi") ||
+            hwaccelArgs.Contains("cuda") ||
+            hwaccelArgs.Contains("d3d11va"));
+        var hwdownloadPrefix = needsHwdownload ? "hwdownload,format=nv12|p010le," : string.Empty;
 
         var width = cfg.IframeWidth.ToString(CultureInfo.InvariantCulture);
         var interval = cfg.IframeIntervalSeconds <= 0 ? 1.0 : cfg.IframeIntervalSeconds;
@@ -589,7 +607,8 @@ public sealed class IframeAssetCache
         // output frame an IDR. Unlike x265, x264 honors keyint=1 cleanly
         // without flipping into a profile Apple decoders reject.
         var filterChain = isHdrSource
-            ? $"fps={fps}," +
+            ? hwdownloadPrefix +
+              $"fps={fps}," +
               "zscale=t=linear:npl=100," +
               "format=gbrpf32le," +
               "zscale=p=bt709," +
@@ -597,7 +616,7 @@ public sealed class IframeAssetCache
               "zscale=t=bt709:m=bt709:r=tv," +
               "format=yuv420p," +
               $"scale=-2:{width}"
-            : $"fps={fps},scale=-2:{width},format=yuv420p";
+            : hwdownloadPrefix + $"fps={fps},scale=-2:{width},format=yuv420p";
         // x264-params color overrides are required: ffmpeg's -color_* output
         // flags set the AVStream metadata but x264 only embeds primaries /
         // transfer / matrix into the H.264 VUI when its own params are given
