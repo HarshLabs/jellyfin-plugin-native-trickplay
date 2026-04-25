@@ -106,20 +106,77 @@
     #NativeTrickplayConfigPage .ntp-badge-queued { background: rgba(255, 159, 10, 0.20); color: rgb(255, 178, 56); }
 
     #NativeTrickplayConfigPage .ntp-results {
-        border: 1px solid rgba(127,127,127,0.18);
-        border-radius: 8px;
         max-height: 520px;
         overflow: auto;
-        background: rgba(127,127,127,0.04);
+        background: transparent;
     }
     #NativeTrickplayConfigPage .ntp-empty { padding: 2em; text-align: center; opacity: 0.55; font-size: 0.95em; }
     #NativeTrickplayConfigPage .ntp-results-meta { opacity: 0.55; font-size: 0.85em; font-variant-numeric: tabular-nums; }
 
     #NativeTrickplayConfigPage .ntp-search-help { font-size: 0.82em; opacity: 0.55; margin: 0.5em 0 0; line-height: 1.5; }
-    #NativeTrickplayConfigPage .ntp-search-help code {
+    #NativeTrickplayConfigPage .ntp-search-help code,
+    #NativeTrickplayConfigPage .ntp-hint code {
         background: rgba(127,127,127,0.18);
         padding: 1px 6px; border-radius: 4px;
         font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    /* ── Find & select section: labeled inputs, custom chevrons, attached toolbar */
+    #NativeTrickplayConfigPage .ntp-input-group { display: flex; flex-direction: column; gap: 0.45em; min-width: 0; }
+    #NativeTrickplayConfigPage .ntp-input-label {
+        font-size: 0.82em; font-weight: 500;
+        opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    #NativeTrickplayConfigPage .ntp-search-row { display: flex; gap: 0.6em; align-items: stretch; }
+    #NativeTrickplayConfigPage .ntp-search-row > input { flex: 1 1 auto; min-width: 0; }
+    #NativeTrickplayConfigPage .ntp-search-row > .ntp-btn { flex: 0 0 auto; }
+    #NativeTrickplayConfigPage .ntp-filter-row {
+        display: grid;
+        grid-template-columns: 1fr 1.4fr;
+        gap: 1em;
+        margin-top: 1.25em;
+    }
+    #NativeTrickplayConfigPage .ntp-hint { font-size: 0.85em; opacity: 0.6; margin: 0.5em 0 0; line-height: 1.5; }
+
+    /* Custom chevron on selects so they read as dropdowns instead of
+       looking like static label rows. Uses an inline SVG so the
+       chevron color follows the theme via currentColor (encoded). */
+    #NativeTrickplayConfigPage select.ntp-select {
+        appearance: none; -webkit-appearance: none; -moz-appearance: none;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");
+        background-repeat: no-repeat;
+        background-position: right 0.85em center;
+        background-size: 12px 8px;
+        padding-right: 2.4em;
+        cursor: pointer;
+    }
+
+    /* Results toolbar visually attached to the table */
+    #NativeTrickplayConfigPage .ntp-results-card {
+        margin-top: 1.25em;
+        border: 1px solid rgba(127,127,127,0.18);
+        border-radius: 10px;
+        overflow: hidden;
+        background: rgba(127,127,127,0.04);
+    }
+    #NativeTrickplayConfigPage .ntp-results-toolbar {
+        display: flex; align-items: center; gap: 0.75em; flex-wrap: wrap;
+        padding: 0.85em 1.1em;
+        border-bottom: 1px solid rgba(127,127,127,0.18);
+        background: rgba(127,127,127,0.05);
+    }
+    #NativeTrickplayConfigPage .ntp-results-toolbar .ntp-toolbar-actions { margin-left: auto; display: flex; gap: 0.5em; }
+    #NativeTrickplayConfigPage .ntp-results-toolbar label {
+        display: inline-flex; align-items: center; gap: 0.5em;
+        font-size: 0.92em; font-weight: 500; cursor: pointer;
+    }
+
+    @media (max-width: 700px) {
+        #NativeTrickplayConfigPage .ntp-search-row { flex-direction: column; }
+        #NativeTrickplayConfigPage .ntp-search-row > .ntp-btn { width: 100%; }
+        #NativeTrickplayConfigPage .ntp-filter-row { grid-template-columns: 1fr; }
+        #NativeTrickplayConfigPage .ntp-results-toolbar .ntp-toolbar-actions { margin-left: 0; width: 100%; }
+        #NativeTrickplayConfigPage .ntp-results-toolbar .ntp-toolbar-actions .ntp-btn { flex: 1; }
     }
 
     /* ── Button system: primary / secondary / tertiary / danger ─────
@@ -411,9 +468,12 @@
                         <h2 class="ntp-card-title">Bulk: generate a whole library</h2>
                         <span class="ntp-card-subtitle">Queues every video item — runs in the background</span>
                     </div>
-                    <div class="ntp-row">
-                        <select id="ntpLibrarySelect" is="emby-select" style="min-width:240px;"></select>
-                        <button id="ntpGenerateLibraryBtn" type="button" class="ntp-btn ntp-btn-primary">Generate all in library</button>
+                    <div class="ntp-input-group" style="max-width: 480px;">
+                        <label class="ntp-input-label" for="ntpLibrarySelect">Library</label>
+                        <div class="ntp-search-row">
+                            <select id="ntpLibrarySelect" class="ntp-select"></select>
+                            <button id="ntpGenerateLibraryBtn" type="button" class="ntp-btn ntp-btn-primary">Generate all</button>
+                        </div>
                     </div>
                 </div>
 
@@ -423,45 +483,58 @@
                         <span class="ntp-card-subtitle">Per-item generate, regenerate, and evict</span>
                     </div>
 
-                    <div class="ntp-row" style="margin-bottom:0.4em;">
-                        <input id="ntpSearch" is="emby-input" type="text"
-                               placeholder="Search title or series…"
-                               style="min-width:280px; flex:1; max-width:520px;" />
-                        <select id="ntpFilterCached" is="emby-select" title="Cache status filter">
-                            <option value="all">All items</option>
-                            <option value="false">Not cached</option>
-                            <option value="true">Cached</option>
-                        </select>
-                        <select id="ntpSortBy" is="emby-select" title="Sort order">
-                            <option value="recent">Recently added</option>
-                            <option value="name">Title (A → Z)</option>
-                            <option value="name_desc">Title (Z → A)</option>
-                            <option value="series">Series · season · episode</option>
-                            <option value="size">Cache size (largest first)</option>
-                            <option value="size_asc">Cache size (smallest first)</option>
-                            <option value="cached">Cached items first</option>
-                            <option value="uncached">Uncached items first</option>
-                            <option value="runtime">Runtime (longest first)</option>
-                        </select>
-                        <button id="ntpSearchBtn" type="button" class="ntp-btn ntp-btn-primary">Search</button>
+                    <div class="ntp-input-group">
+                        <label class="ntp-input-label" for="ntpSearch">Search</label>
+                        <div class="ntp-search-row">
+                            <input id="ntpSearch" is="emby-input" type="text" placeholder="Title or series…" />
+                            <button id="ntpSearchBtn" type="button" class="ntp-btn ntp-btn-primary">Search</button>
+                        </div>
+                        <p class="ntp-hint">
+                            Tokens are AND-matched; matching is case + accent insensitive. Try
+                            <code>elementary S6E18</code>, <code>elementary S7</code>,
+                            <code>1x05</code>, <code>Season 6</code>, or <code>Episode 18</code>.
+                        </p>
                     </div>
-                    <p class="ntp-search-help">
-                        Tokens are AND-matched; matching is case + accent insensitive. Recognized season/episode forms:
-                        <code>elementary S6E18</code>, <code>elementary S7</code>,
-                        <code>1x05</code>, <code>Season 6</code>, <code>Episode 18</code>.
-                    </p>
 
-                    <div class="ntp-row" style="margin: 1em 0 0.5em;">
-                        <label class="ntp-row" style="gap:0.4em;">
-                            <input type="checkbox" id="ntpSelectAll" />
-                            <span>Select all visible</span>
-                        </label>
-                        <span id="ntpResultsMeta" class="ntp-results-meta"></span>
-                        <span class="ntp-spacer" style="flex:1;"></span>
-                        <button id="ntpGenerateSelectedBtn" type="button" class="ntp-btn ntp-btn-primary ntp-btn-sm">Generate selected</button>
-                        <button id="ntpEvictSelectedBtn" type="button" class="ntp-btn ntp-btn-danger ntp-btn-sm">Evict selected</button>
+                    <div class="ntp-filter-row">
+                        <div class="ntp-input-group">
+                            <label class="ntp-input-label" for="ntpFilterCached">Cache filter</label>
+                            <select id="ntpFilterCached" class="ntp-select">
+                                <option value="all">All items</option>
+                                <option value="false">Not cached</option>
+                                <option value="true">Cached</option>
+                            </select>
+                        </div>
+                        <div class="ntp-input-group">
+                            <label class="ntp-input-label" for="ntpSortBy">Sort by</label>
+                            <select id="ntpSortBy" class="ntp-select">
+                                <option value="recent">Recently added</option>
+                                <option value="name">Title (A → Z)</option>
+                                <option value="name_desc">Title (Z → A)</option>
+                                <option value="series">Series · season · episode</option>
+                                <option value="size">Cache size (largest first)</option>
+                                <option value="size_asc">Cache size (smallest first)</option>
+                                <option value="cached">Cached items first</option>
+                                <option value="uncached">Uncached items first</option>
+                                <option value="runtime">Runtime (longest first)</option>
+                            </select>
+                        </div>
                     </div>
-                    <div id="ntpResults" class="ntp-results"></div>
+
+                    <div class="ntp-results-card">
+                        <div class="ntp-results-toolbar">
+                            <label>
+                                <input type="checkbox" id="ntpSelectAll" />
+                                <span>Select all visible</span>
+                            </label>
+                            <span id="ntpResultsMeta" class="ntp-results-meta"></span>
+                            <div class="ntp-toolbar-actions">
+                                <button id="ntpGenerateSelectedBtn" type="button" class="ntp-btn ntp-btn-primary ntp-btn-sm">Generate selected</button>
+                                <button id="ntpEvictSelectedBtn" type="button" class="ntp-btn ntp-btn-danger ntp-btn-sm">Evict selected</button>
+                            </div>
+                        </div>
+                        <div id="ntpResults" class="ntp-results"></div>
+                    </div>
                 </div>
 
             </div>
