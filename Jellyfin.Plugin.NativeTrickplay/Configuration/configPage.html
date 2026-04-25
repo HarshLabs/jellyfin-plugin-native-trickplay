@@ -373,6 +373,44 @@
     }
     @keyframes ntpSpin { to { transform: rotate(360deg); } }
 
+    /* Encoding-in-progress card supports collapse/expand for huge
+       queues (thousands of items). Default view caps the visible rows
+       and surfaces a summary above + expand button below. */
+    #NativeTrickplayConfigPage #ntpProgressList {
+        overflow: hidden;
+        transition: max-height 240ms ease;
+    }
+    #NativeTrickplayConfigPage #ntpProgressList.expanded {
+        max-height: 600px;
+        overflow-y: auto;
+    }
+    #NativeTrickplayConfigPage .ntp-progress-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75em;
+        padding-top: 0.85em;
+        margin-top: 0.5em;
+        border-top: 1px solid rgba(127,127,127,0.12);
+        font-size: 0.85em;
+        opacity: 0.7;
+    }
+    #NativeTrickplayConfigPage .ntp-progress-footer:empty { display: none; }
+    #NativeTrickplayConfigPage .ntp-mini-action {
+        background: transparent;
+        border: 1px solid rgba(127,127,127,0.25);
+        border-radius: 6px;
+        padding: 0.4em 0.85em;
+        font: inherit; font-size: 0.85em; font-weight: 500;
+        color: rgb(80, 165, 255);
+        cursor: pointer;
+        transition: background-color 120ms ease, border-color 120ms ease;
+    }
+    #NativeTrickplayConfigPage .ntp-mini-action:hover {
+        background: rgba(10, 132, 255, 0.10);
+        border-color: rgba(10, 132, 255, 0.4);
+    }
+
     /* Pulse on the running badge so an active encode is unmistakable. */
     #NativeTrickplayConfigPage .ntp-badge-running {
         animation: ntpPulse 1.6s ease-in-out infinite;
@@ -703,9 +741,10 @@
                 <div class="ntp-card" id="ntpProgress" style="display:none;">
                     <div class="ntp-card-header">
                         <h2 class="ntp-card-title">Encoding in progress</h2>
-                        <span class="ntp-card-subtitle">Live • polled every 2s</span>
+                        <span class="ntp-card-subtitle" id="ntpProgressSummary">Live · polled every 2s</span>
                     </div>
                     <div id="ntpProgressList"></div>
+                    <div id="ntpProgressFooter" class="ntp-progress-footer"></div>
                 </div>
 
                 <div class="ntp-card">
@@ -1083,6 +1122,14 @@
         // ── Progress panel (polls /Progress) ──────────────────────────────
         var ntpProgressTimer = null;
         var ntpLastInflightCount = -1;
+        // Default visible rows in the Encoding-in-progress card. Bulk-
+        // generating a whole library can produce hundreds or thousands
+        // of in-flight items; rendering them all every 2s thrashes the
+        // browser. We always show running items + the first N queued
+        // and let the user expand to see everything.
+        var ntpProgressDefaultLimit = 10;
+        var ntpProgressShowAll = false;
+
         function ntpPollProgress() {
             return ntpFetch('Progress').then(function (p) {
                 // Always sync table rows first — this is the live
@@ -1091,14 +1138,37 @@
 
                 var box = document.querySelector('#ntpProgress');
                 var list = document.querySelector('#ntpProgressList');
+                var summary = document.querySelector('#ntpProgressSummary');
+                var footer = document.querySelector('#ntpProgressFooter');
+
                 if (!p.Inflight || p.Inflight.length === 0) {
                     box.style.display = 'none';
                     if (ntpLastInflightCount > 0) ntpRefreshStatus();
                     ntpLastInflightCount = 0;
+                    ntpProgressShowAll = false;
                     return;
                 }
                 ntpLastInflightCount = p.Inflight.length;
                 box.style.display = '';
+
+                // Sort: running first (so the actively-encoding item is
+                // always visible), then queued in submission order.
+                var running = p.Inflight.filter(function (it) { return it.Status === 'running'; });
+                var queued  = p.Inflight.filter(function (it) { return it.Status !== 'running'; });
+                var sorted = running.concat(queued);
+                var total = sorted.length;
+
+                // Render either the first N or the full list based on toggle
+                var visible = ntpProgressShowAll ? sorted : sorted.slice(0, ntpProgressDefaultLimit);
+                var hidden = total - visible.length;
+
+                summary.textContent =
+                    'Live · polled every 2s · ' +
+                    running.length + ' running · ' + queued.length + ' queued · ' + total + ' total';
+
+                list.className = ntpProgressShowAll && hidden === 0 && total > ntpProgressDefaultLimit
+                    ? 'expanded' : (ntpProgressShowAll ? 'expanded' : '');
+
                 list.innerHTML =
                     '<table class="ntp-table"><thead><tr>' +
                     '<th>Item</th>' +
@@ -1106,17 +1176,37 @@
                     '<th style="width:7em;">Elapsed</th>' +
                     '<th style="width:9em;">Output</th>' +
                     '</tr></thead><tbody>' +
-                    p.Inflight.map(function (it) {
+                    visible.map(function (it) {
                         var badge = it.Status === 'running'
                             ? '<span class="ntp-badge ntp-badge-running">▶ running</span>'
                             : '<span class="ntp-badge ntp-badge-queued">⏸ queued</span>';
                         return '<tr>' +
                             '<td>' + ntpEscape(it.ItemName) + '</td>' +
                             '<td>' + badge + '</td>' +
-                            '<td>' + ntpFmtElapsed(it.StartedUtc, p.ServerUtc) + '</td>' +
+                            '<td>' + (it.Status === 'running' ? ntpFmtElapsed(it.StartedUtc, p.ServerUtc) : '—') + '</td>' +
                             '<td>' + (it.PartialBytes ? ntpFmtBytes(it.PartialBytes) : '—') + '</td>' +
                             '</tr>';
                     }).join('') + '</tbody></table>';
+
+                // Footer: only show toggle if there's something to expand/collapse.
+                if (total > ntpProgressDefaultLimit) {
+                    footer.innerHTML =
+                        (hidden > 0
+                            ? '<span>+ ' + hidden + ' more queued</span>'
+                            : '<span>Showing all ' + total + ' items</span>') +
+                        '<button type="button" class="ntp-mini-action" id="ntpProgressToggle">' +
+                            (ntpProgressShowAll ? 'Show fewer' : 'Show all (' + total + ')') +
+                        '</button>';
+                    var toggle = document.querySelector('#ntpProgressToggle');
+                    if (toggle) {
+                        toggle.addEventListener('click', function () {
+                            ntpProgressShowAll = !ntpProgressShowAll;
+                            ntpPollProgress();
+                        });
+                    }
+                } else {
+                    footer.innerHTML = '';
+                }
             });
         }
         function ntpStartProgressPolling() {
