@@ -17,9 +17,9 @@ namespace Jellyfin.Plugin.NativeTrickplay;
 public class PluginConfiguration : BasePluginConfiguration
 {
     public bool Enabled { get; set; } = true;
-    public int IframeWidth { get; set; } = 480;
-    public int IframeCrf { get; set; } = 30;
-    public string IframePreset { get; set; } = "veryfast";
+    public int IframeWidth { get; set; } = 320;
+    public int IframeCrf { get; set; } = 32;
+    public string IframePreset { get; set; } = "ultrafast";
     public int MaxConcurrentGenerations { get; set; } = 1;
 
     // Pruner knobs (used by PruneTrickplayCacheTask)
@@ -62,6 +62,10 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IframeAssetCache>();
         serviceCollection.AddSingleton<MasterPlaylistInjector>();
         serviceCollection.AddSingleton<IScheduledTask, PruneTrickplayCacheTask>();
+        // Walks the whole library off-hours and encodes any item that isn't
+        // already cached. Eliminates the first-scrub wait entirely once it
+        // has run once.
+        serviceCollection.AddSingleton<IScheduledTask, PreGenerateIframeAssetsTask>();
         // Pre-warms the cache when playback starts so the user's first scrub is
         // served from disk instead of blocking on a 10-30s ffmpeg encode.
         serviceCollection.AddHostedService<PlaybackWarmupService>();
