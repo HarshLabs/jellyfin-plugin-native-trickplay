@@ -951,8 +951,13 @@
         }
 
         // ── Status panel ──────────────────────────────────────────────────
+        // Last /Status response, kept around so the bulk-library button
+        // can compute its label without an extra fetch.
+        var ntpLastStatus = null;
+
         function ntpRefreshStatus() {
             return ntpFetch('Status').then(function (s) {
+                ntpLastStatus = s;
                 var libsTotal = s.Libraries.reduce(function (acc, l) { return acc + l.TotalItems; }, 0);
                 document.querySelector('#ntpStatusMeta').textContent =
                     s.CachedItems + ' of ' + libsTotal + ' items cached · ' + ntpFmtBytes(s.CachedBytes) + ' on disk';
@@ -982,7 +987,51 @@
                         sel.appendChild(opt);
                     });
                 }
+                ntpUpdateLibraryBtnState();
             });
+        }
+
+        // Reactive label for the bulk Generate-all-in-library button:
+        // shows the selected library's current coverage, swaps the
+        // verb to "Re-generate all" once a library is fully cached,
+        // and respects post-click cooldown to debounce double-clicks.
+        var ntpLibraryBtnCooldownUntil = 0;
+        function ntpUpdateLibraryBtnState() {
+            var btn = document.querySelector('#ntpGenerateLibraryBtn');
+            var sel = document.querySelector('#ntpLibrarySelect');
+            if (!btn || !sel) return;
+            // Don't fight with an in-flight request — the busy spinner
+            // owns the button label until the request resolves.
+            if (btn.getAttribute('aria-busy') === 'true') return;
+
+            var inCooldown = Date.now() < ntpLibraryBtnCooldownUntil;
+            if (inCooldown) {
+                btn.disabled = true;
+                btn.textContent = 'Queued ✓';
+                // Re-evaluate when cooldown expires
+                setTimeout(ntpUpdateLibraryBtnState, ntpLibraryBtnCooldownUntil - Date.now() + 50);
+                return;
+            }
+
+            var libId = sel.value;
+            if (!libId || !ntpLastStatus) {
+                btn.disabled = false;
+                btn.textContent = 'Generate all';
+                return;
+            }
+            var lib = (ntpLastStatus.Libraries || []).find(function (l) { return l.Id === libId; });
+            if (!lib || lib.TotalItems === 0) {
+                btn.disabled = (lib && lib.TotalItems === 0);
+                btn.textContent = 'Generate all';
+                return;
+            }
+
+            btn.disabled = false;
+            if (lib.CachedItems >= lib.TotalItems) {
+                btn.textContent = 'Re-generate all (' + lib.TotalItems + ')';
+            } else {
+                btn.textContent = 'Generate all · ' + lib.CachedItems + ' / ' + lib.TotalItems;
+            }
         }
 
         // ── Progress panel (polls /Progress) ──────────────────────────────
@@ -1183,8 +1232,12 @@
             }).then(function (r) {
                 var n = r.Queued || 0;
                 var msg = n + ' item' + (n === 1 ? '' : 's') + ' queued for generation';
-                if (r.Skipped > 0) msg += ' · ' + r.Skipped + ' already done';
+                if (r.Skipped > 0) msg += ' · ' + r.Skipped + ' already cached';
                 ntpToast(msg, 'success');
+                // 4-second post-click cooldown so a quick double-click
+                // can't fire two GenerateLibrary requests; the button
+                // label flips to "Queued ✓" until coverage data refreshes.
+                ntpLibraryBtnCooldownUntil = Date.now() + 4000;
                 ntpRefreshStatus();
                 ntpPollProgress();
                 ntpRunSearch();
@@ -1192,6 +1245,9 @@
                 ntpToast('Library queue failed' + (err && err.message ? ': ' + err.message : ''), 'error');
             });
         });
+
+        // Re-evaluate button label whenever the user switches libraries
+        document.querySelector('#ntpLibrarySelect').addEventListener('change', ntpUpdateLibraryBtnState);
     </script>
 </div>
 </body>
