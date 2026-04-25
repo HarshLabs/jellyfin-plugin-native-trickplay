@@ -206,17 +206,16 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         int? width = video.Width;
         int? height = video.Height;
         double? fps = video.RealFrameRate ?? video.AverageFrameRate;
-        int? channels = audio?.Channels;
 
+        // Match Jellyfin's own master.m3u8 format exactly: plain STREAM-INF with
+        // audio codec listed in CODECS. Do NOT emit EXT-X-MEDIA:TYPE=AUDIO with
+        // no URI + AUDIO="..." reference on the variant — AVPlayer treats this
+        // as "audio rendition is missing", marks the variant unusable, and
+        // falls back to the I-FRAME variant for primary playback (slideshow
+        // effect) or crashes outright for HEVC content.
         var sb = new StringBuilder(640);
         sb.AppendLine("#EXTM3U");
         sb.AppendLine("#EXT-X-VERSION:6");
-
-        if (audio is not null)
-        {
-            sb.Append(ci, $"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",DEFAULT=YES,CHANNELS=\"{channels ?? 2}\"")
-              .AppendLine();
-        }
 
         sb.Append("#EXT-X-STREAM-INF:");
         sb.Append(ci, $"BANDWIDTH={bandwidth}");
@@ -234,7 +233,6 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         {
             sb.Append(ci, $",FRAME-RATE={fps.Value:F3}");
         }
-        if (audio is not null) sb.Append(",AUDIO=\"audio\"");
         sb.AppendLine();
         sb.Append("main.m3u8").Append(innerQs).AppendLine();
 
