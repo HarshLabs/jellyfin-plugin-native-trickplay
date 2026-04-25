@@ -55,8 +55,11 @@ internal static class IframeFormat
     /// </summary>
     public static string EncoderTag(IframeVariant v) => v switch
     {
-        IframeVariant.HdrPq => "hevc-pq",
-        IframeVariant.HdrHlg => "hevc-hlg",
+        // v2 suffix = "encoded with -force_key_frames instead of x265-params keyint=1",
+        // produces standard Main 10 instead of Main 10 Intra (Rext) profile —
+        // bumped in v1.1.1 to invalidate v1.1.0's broken caches.
+        IframeVariant.HdrPq => "hevc-pq-v2",
+        IframeVariant.HdrHlg => "hevc-hlg-v2",
         _ => "h264",
     };
 }
