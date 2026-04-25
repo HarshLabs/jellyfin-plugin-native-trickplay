@@ -1,0 +1,301 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.MediaEncoding;
+using Microsoft.Extensions.Logging;
+
+namespace Jellyfin.Plugin.NativeTrickplay.Hls;
+
+public sealed record IframeAsset(string PlaylistTemplate, string SegmentPath);
+
+public sealed record CacheEntry(Guid ItemId, string Directory, long SizeBytes, DateTime LastAccessUtc);
+
+public sealed class IframeAssetCache
+{
+    private readonly ILogger<IframeAssetCache> _logger;
+    private readonly IApplicationPaths _paths;
+    private readonly ILibraryManager _libraryManager;
+    private readonly IMediaEncoder _encoder;
+    private readonly ConcurrentDictionary<string, Lazy<Task<IframeAsset>>> _inflight = new();
+    private readonly SemaphoreSlim _globalLimit;
+
+    public IframeAssetCache(
+        ILogger<IframeAssetCache> logger,
+        IApplicationPaths paths,
+        ILibraryManager libraryManager,
+        IMediaEncoder encoder)
+    {
+        _logger = logger;
+        _paths = paths;
+        _libraryManager = libraryManager;
+        _encoder = encoder;
+        var max = Plugin.Instance?.Configuration.MaxConcurrentGenerations ?? 1;
+        _globalLimit = new SemaphoreSlim(Math.Max(1, max));
+    }
+
+    public Task<IframeAsset> GetOrCreateAsync(Guid itemId, CancellationToken ct)
+    {
+        var key = itemId.ToString("N");
+        var lazy = _inflight.GetOrAdd(key, _ => new Lazy<Task<IframeAsset>>(
+            () => GenerateAsync(itemId, ct), LazyThreadSafetyMode.ExecutionAndPublication));
+        var task = lazy.Value;
+        if (task.IsCompleted) _inflight.TryRemove(key, out _);
+        return task;
+    }
+
+    /// <summary>
+    /// Enumerates on-disk cache entries. Skips directories whose names aren't valid
+    /// item GUIDs, and folds size + max access time across all files in each entry.
+    /// Streams (no full materialization) so the pruner can iterate large caches safely.
+    /// </summary>
+    public IEnumerable<CacheEntry> EnumerateCache()
+    {
+        var root = Path.Combine(_paths.CachePath, "native-trickplay");
+        if (!Directory.Exists(root)) yield break;
+
+        foreach (var dirPath in Directory.EnumerateDirectories(root))
+        {
+            var name = Path.GetFileName(dirPath);
+            if (!Guid.TryParseExact(name, "N", out var itemId)) continue;
+
+            long size = 0;
+            DateTime lastAccess = DateTime.MinValue;
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(dirPath))
+                {
+                    var fi = new FileInfo(file);
+                    size += fi.Length;
+                    var t = fi.LastAccessTimeUtc;
+                    if (t > lastAccess) lastAccess = t;
+                }
+            }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+
+            if (lastAccess == DateTime.MinValue) lastAccess = DateTime.UtcNow;
+            yield return new CacheEntry(itemId, dirPath, size, lastAccess);
+        }
+    }
+
+    /// <summary>
+    /// Attempts to delete a cache entry. Returns false if the item is currently being
+    /// generated (skip — try again next pass) or if deletion fails. Safe to call
+    /// concurrently with GetOrCreateAsync — the in-flight dictionary acts as the gate.
+    /// </summary>
+    public bool TryEvict(Guid itemId)
+    {
+        var key = itemId.ToString("N");
+        if (_inflight.ContainsKey(key)) return false;
+
+        var dir = Path.Combine(_paths.CachePath, "native-trickplay", key);
+        if (!Directory.Exists(dir)) return false;
+
+        try
+        {
+            Directory.Delete(dir, recursive: true);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    private async Task<IframeAsset> GenerateAsync(Guid itemId, CancellationToken ct)
+    {
+        if (_libraryManager.GetItemById(itemId) is not BaseItem item || string.IsNullOrEmpty(item.Path))
+        {
+            throw new InvalidOperationException($"Item {itemId} not found or has no path.");
+        }
+
+        var sourcePath = item.Path;
+        var sourceMtime = File.GetLastWriteTimeUtc(sourcePath);
+
+        var dir = Path.Combine(_paths.CachePath, "native-trickplay", itemId.ToString("N"));
+        Directory.CreateDirectory(dir);
+
+        var playlistPath = Path.Combine(dir, "iframe.m3u8");
+        var segmentPath = Path.Combine(dir, "iframe.m4s");
+        var stampPath = Path.Combine(dir, ".source-mtime");
+
+        if (File.Exists(playlistPath) && File.Exists(segmentPath) && File.Exists(stampPath)
+            && long.TryParse(await File.ReadAllTextAsync(stampPath, ct).ConfigureAwait(false), out var stamped)
+            && stamped == sourceMtime.Ticks)
+        {
+            return new IframeAsset(await File.ReadAllTextAsync(playlistPath, ct).ConfigureAwait(false), segmentPath);
+        }
+
+        await _globalLimit.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var tmpSegmentPath = segmentPath + ".tmp";
+            if (File.Exists(tmpSegmentPath)) File.Delete(tmpSegmentPath);
+
+            await RunFfmpegAsync(sourcePath, tmpSegmentPath, ct).ConfigureAwait(false);
+
+            var (initSize, fragments) = Mp4BoxScanner.Scan(tmpSegmentPath);
+            if (fragments.Count == 0)
+            {
+                throw new InvalidOperationException("ffmpeg produced no fragments.");
+            }
+
+            var durations = await ProbePtsDeltasAsync(tmpSegmentPath, fragments.Count, ct).ConfigureAwait(false);
+            var template = BuildPlaylist(initSize, fragments, durations);
+
+            File.Move(tmpSegmentPath, segmentPath, overwrite: true);
+            await File.WriteAllTextAsync(playlistPath, template, ct).ConfigureAwait(false);
+            await File.WriteAllTextAsync(stampPath, sourceMtime.Ticks.ToString(CultureInfo.InvariantCulture), ct)
+                .ConfigureAwait(false);
+
+            _logger.LogInformation("[NativeTrickplay] generated {Frames} I-frames for {ItemId}", fragments.Count, itemId);
+            return new IframeAsset(template, segmentPath);
+        }
+        finally
+        {
+            _globalLimit.Release();
+        }
+    }
+
+    private async Task RunFfmpegAsync(string inputPath, string outputPath, CancellationToken ct)
+    {
+        var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var args = new[]
+        {
+            "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+            "-skip_frame", "nokey",
+            "-i", inputPath,
+            "-an", "-sn",
+            "-fps_mode", "passthrough",
+            "-vf", $"scale=-2:{cfg.IframeWidth.ToString(CultureInfo.InvariantCulture)},format=yuv420p",
+            "-c:v", "libx264",
+            "-preset", cfg.IframePreset,
+            "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
+            "-profile:v", "main", "-level:v", "3.0",
+            "-x264-params", "keyint=1:scenecut=0:open-gop=0",
+            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+            "-f", "mp4", outputPath
+        };
+
+        await RunProcessAsync(_encoder.EncoderPath, args, ct).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<double>> ProbePtsDeltasAsync(string filePath, int expectedCount, CancellationToken ct)
+    {
+        var ffprobe = Path.Combine(Path.GetDirectoryName(_encoder.EncoderPath)!, "ffprobe");
+        var args = new[]
+        {
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time",
+            "-of", "csv=p=0",
+            filePath
+        };
+
+        var stdout = await RunProcessAsync(ffprobe, args, ct, captureStdout: true).ConfigureAwait(false);
+        var ptsList = new List<double>(expectedCount);
+        foreach (var raw in stdout.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0) continue;
+            if (double.TryParse(line, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
+            {
+                ptsList.Add(v);
+            }
+        }
+
+        var durations = new double[expectedCount];
+        for (int i = 0; i < expectedCount; i++)
+        {
+            if (i + 1 < ptsList.Count)
+            {
+                durations[i] = Math.Max(0.001, ptsList[i + 1] - ptsList[i]);
+            }
+            else if (i > 0 && durations[i - 1] > 0)
+            {
+                durations[i] = durations[i - 1]; // last frame: reuse prior duration
+            }
+            else
+            {
+                durations[i] = 1.0;
+            }
+        }
+        return durations;
+    }
+
+    private async Task<string> RunProcessAsync(string fileName, IReadOnlyList<string> args, CancellationToken ct, bool captureStdout = false)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = fileName,
+            RedirectStandardError = true,
+            RedirectStandardOutput = captureStdout,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+
+        _logger.LogDebug("[NativeTrickplay] {File} {Args}", fileName, string.Join(' ', args));
+
+        using var proc = new Process { StartInfo = psi };
+        proc.Start();
+
+        var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+        var stdoutTask = captureStdout ? proc.StandardOutput.ReadToEndAsync(ct) : Task.FromResult(string.Empty);
+
+        try
+        {
+            await proc.WaitForExitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { /* already gone */ }
+            throw;
+        }
+
+        var stderr = await stderrTask.ConfigureAwait(false);
+        var stdout = await stdoutTask.ConfigureAwait(false);
+        if (proc.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"{Path.GetFileName(fileName)} exited {proc.ExitCode}: {stderr}");
+        }
+        return stdout;
+    }
+
+    private static string BuildPlaylist(long initSize, IReadOnlyList<FragmentRange> fragments, IReadOnlyList<double> durations)
+    {
+        var ci = CultureInfo.InvariantCulture;
+        var maxDur = 0.0;
+        for (int i = 0; i < durations.Count; i++) if (durations[i] > maxDur) maxDur = durations[i];
+
+        var sb = new StringBuilder(fragments.Count * 80);
+        sb.AppendLine("#EXTM3U");
+        sb.AppendLine("#EXT-X-VERSION:7");
+        sb.Append("#EXT-X-TARGETDURATION:").AppendLine(((int)Math.Ceiling(Math.Max(1, maxDur))).ToString(ci));
+        sb.AppendLine("#EXT-X-MEDIA-SEQUENCE:0");
+        sb.AppendLine("#EXT-X-PLAYLIST-TYPE:VOD");
+        sb.AppendLine("#EXT-X-I-FRAMES-ONLY");
+        sb.Append("#EXT-X-MAP:URI=\"iframe.m4s{AUTH}\",BYTERANGE=\"")
+          .Append(initSize.ToString(ci))
+          .AppendLine("@0\"");
+
+        for (int i = 0; i < fragments.Count; i++)
+        {
+            sb.Append("#EXTINF:").Append(durations[i].ToString("F3", ci)).AppendLine(",");
+            sb.Append("#EXT-X-BYTERANGE:")
+              .Append(fragments[i].Size.ToString(ci)).Append('@')
+              .Append(fragments[i].Offset.ToString(ci))
+              .AppendLine();
+            sb.AppendLine("iframe.m4s{AUTH}");
+        }
+        sb.AppendLine("#EXT-X-ENDLIST");
+        return sb.ToString();
+    }
+}

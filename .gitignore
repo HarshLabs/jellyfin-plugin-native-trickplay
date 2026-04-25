@@ -1,0 +1,19 @@
+# Build artifacts
+bin/
+obj/
+out/
+artifacts/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# macOS
+.DS_Store
+
+# Local test outputs
+*.log
+*.zip

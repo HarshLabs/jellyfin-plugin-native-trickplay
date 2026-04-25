@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Native Trickplay</title>
+</head>
+<body>
+<div id="NativeTrickplayConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div data-role="content">
+        <div class="content-primary">
+            <form id="NativeTrickplayConfigForm">
+                <div class="verticalSection">
+                    <h2>Native Trickplay</h2>
+                    <p>Generates HLS I-frame playlists so AVPlayer (Apple TV) gets native scrubbing thumbnails. Asset is built once per item and cached.</p>
+                </div>
+
+                <div class="verticalSection">
+                    <h3>Generation</h3>
+                </div>
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="Enabled" type="checkbox" is="emby-checkbox" />
+                        <span>Enable plugin</span>
+                    </label>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel" for="IframeWidth">Thumbnail width (px, height auto-scaled)</label>
+                    <input id="IframeWidth" type="number" is="emby-input" min="160" max="1920" />
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel" for="IframeCrf">CRF (encoder quality, lower=better; 18-32 typical)</label>
+                    <input id="IframeCrf" type="number" is="emby-input" min="18" max="40" />
+                </div>
+
+                <div class="verticalSection">
+                    <h3>Cache pruning</h3>
+                    <p>Runs daily at 3 AM by default; can be triggered manually from Dashboard → Scheduled Tasks → Native Trickplay.</p>
+                </div>
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="PruneOrphans" type="checkbox" is="emby-checkbox" />
+                        <span>Remove caches for deleted/unknown items</span>
+                    </label>
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel" for="MaxAgeDays">Age-based eviction: delete after N days unaccessed (0 = disabled)</label>
+                    <input id="MaxAgeDays" type="number" is="emby-input" min="0" max="3650" />
+                </div>
+                <div class="inputContainer">
+                    <label class="inputLabel" for="MaxCacheGigabytes">Size cap: keep total cache under N GB by LRU eviction (0 = disabled)</label>
+                    <input id="MaxCacheGigabytes" type="number" is="emby-input" min="0" max="10240" />
+                </div>
+
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block">
+                        <span>Save</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <script>
+        var pluginId = "6911edf0-840d-4a71-965d-1319cbb2efd1";
+        document.querySelector('#NativeTrickplayConfigPage').addEventListener('pageshow', function () {
+            ApiClient.getPluginConfiguration(pluginId).then(function (cfg) {
+                document.querySelector('#Enabled').checked = cfg.Enabled;
+                document.querySelector('#IframeWidth').value = cfg.IframeWidth;
+                document.querySelector('#IframeCrf').value = cfg.IframeCrf;
+                document.querySelector('#PruneOrphans').checked = cfg.PruneOrphans;
+                document.querySelector('#MaxAgeDays').value = cfg.MaxAgeDays;
+                document.querySelector('#MaxCacheGigabytes').value = cfg.MaxCacheGigabytes;
+            });
+        });
+        document.querySelector('#NativeTrickplayConfigForm').addEventListener('submit', function (e) {
+            e.preventDefault();
+            ApiClient.getPluginConfiguration(pluginId).then(function (cfg) {
+                cfg.Enabled = document.querySelector('#Enabled').checked;
+                cfg.IframeWidth = parseInt(document.querySelector('#IframeWidth').value, 10);
+                cfg.IframeCrf = parseInt(document.querySelector('#IframeCrf').value, 10);
+                cfg.PruneOrphans = document.querySelector('#PruneOrphans').checked;
+                cfg.MaxAgeDays = parseInt(document.querySelector('#MaxAgeDays').value, 10);
+                cfg.MaxCacheGigabytes = parseInt(document.querySelector('#MaxCacheGigabytes').value, 10);
+                ApiClient.updatePluginConfiguration(pluginId, cfg).then(Dashboard.processPluginConfigurationUpdateResult);
+            });
+            return false;
+        });
+    </script>
+</div>
+</body>
+</html>

@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 1.0.0.0). Dry-run only — real releases come from tag pushes.'
+        required: false
+        default: '0.0.0.0'
+
+jobs:
+  build:
+    name: Build, package, publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to push the manifest.json update back to main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install jprm
+        run: pip install --upgrade jprm
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Build plugin zip
+        id: build
+        run: |
+          # jprm reads build.yaml from the project subdir, runs dotnet publish,
+          # writes <name>_<version>.zip + .md5sum + .meta.json into ./artifacts/.
+          # jprm requires the output dir to exist already.
+          mkdir -p artifacts
+          jprm --verbosity=debug plugin build \
+            --version="${{ steps.version.outputs.version }}" \
+            Jellyfin.Plugin.NativeTrickplay
+          ZIP=$(ls artifacts/*.zip | head -1)
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Built: $ZIP"
+          ls -la artifacts/
+
+      - name: Update manifest.json on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          ZIP_NAME=$(basename "${{ steps.build.outputs.zip }}")
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${ZIP_NAME}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Land the manifest commit on main, not the tag — rebase in case main
+          # moved during the build.
+          git fetch origin main
+          git checkout -B main origin/main
+
+          jprm repo add . "${{ steps.build.outputs.zip }}" --plugin-url="$DOWNLOAD_URL"
+
+          if git diff --quiet manifest.json; then
+            echo "manifest.json unchanged"
+          else
+            git add manifest.json
+            git commit -m "Publish ${{ github.ref_name }} to manifest"
+            git push origin main
+          fi
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build.outputs.zip }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
