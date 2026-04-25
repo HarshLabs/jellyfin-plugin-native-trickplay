@@ -12,8 +12,8 @@
                 "changelog": "Initial release.\n",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.17.0/native-trickplay_1.1.17.0.zip",
-                "checksum": "89dc954b15ed84e899562f9507943685",
-                "timestamp": "2026-04-25T18:09:22Z"
+                "checksum": "23fad14932a0b57d2208fe69f56fa9a9",
+                "timestamp": "2026-04-25T18:09:26Z"
             },
             {
                 "version": "1.1.16.0",
