@@ -5,9 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Jellyfin.Plugin.NativeTrickplay</RootNamespace>
     <AssemblyName>Jellyfin.Plugin.NativeTrickplay</AssemblyName>
-    <AssemblyVersion>1.1.13.0</AssemblyVersion>
-    <FileVersion>1.1.13.0</FileVersion>
-    <Version>1.1.13.0</Version>
+    <AssemblyVersion>1.1.14.0</AssemblyVersion>
+    <FileVersion>1.1.14.0</FileVersion>
+    <Version>1.1.14.0</Version>
     <!-- Plugin DLL is the only thing we ship; the host already has every
          Jellyfin/ASP.NET assembly loaded in-process. Excluding lock-file
          assemblies keeps the publish output minimal. -->
