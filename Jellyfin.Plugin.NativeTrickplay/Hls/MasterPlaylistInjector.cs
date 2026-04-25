@@ -219,6 +219,19 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 
         if (video is null) return false; // can't safely synthesize without video stream metadata
 
+        // HDR/DV main.m3u8 fetches: pass through unchanged. HDR-aware clients
+        // (e.g. JellySeerTV's HDR-Filter) build their own synthetic master
+        // client-side that points at /main.m3u8 as its variant. If we wrap
+        // here, AVPlayer ends up parsing two layered synthetic masters and
+        // stalls waiting for a media playlist that's actually a master. Server-
+        // side trickplay for HDR content has to come through the master.m3u8
+        // path (where we just append #EXT-X-I-FRAME-STREAM-INF without
+        // restructuring), not through main.m3u8 wrapping.
+        if (video.VideoRangeType is not (VideoRangeType.SDR or VideoRangeType.Unknown))
+        {
+            return false;
+        }
+
         var ci = CultureInfo.InvariantCulture;
         var iframeVariant = IframeFormat.FromVideoRange(video.VideoRangeType);
 
