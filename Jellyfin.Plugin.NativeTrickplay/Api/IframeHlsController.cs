@@ -48,6 +48,9 @@ public sealed class IframeHlsController : ControllerBase
         {
             var auth = BuildAuthSuffix(Request);
             var body = cached.PlaylistTemplate.Replace("{AUTH}", auth, StringComparison.Ordinal);
+            _logger.LogInformation(
+                "[NativeTrickplay] iframe.m3u8 served for {ItemId} ({Bytes} bytes)",
+                itemId, body.Length);
             return Content(body, "application/vnd.apple.mpegurl");
         }
 
@@ -56,6 +59,9 @@ public sealed class IframeHlsController : ControllerBase
         // come back later instead of giving up on the I-frame variant for the
         // entire playback session.
         _cache.Warmup(itemId);
+        _logger.LogInformation(
+            "[NativeTrickplay] iframe.m3u8 requested for {ItemId} but not cached — 503 + Retry-After issued",
+            itemId);
         Response.Headers.RetryAfter = RetryAfterSeconds.ToString(CultureInfo.InvariantCulture);
         return StatusCode(StatusCodes.Status503ServiceUnavailable);
     }
@@ -71,12 +77,16 @@ public sealed class IframeHlsController : ControllerBase
         var cached = _cache.TryGetCached(itemId);
         if (cached is null)
         {
-            // Segment requested before playlist is cached — almost always means the
-            // client is looking for a now-evicted asset. Don't trigger generation
-            // here (only the playlist endpoint should), just 404.
+            _logger.LogInformation(
+                "[NativeTrickplay] iframe.m4s requested for {ItemId} but no cache present — 404",
+                itemId);
             return NotFound();
         }
 
+        var range = Request.Headers.Range.ToString();
+        _logger.LogInformation(
+            "[NativeTrickplay] iframe.m4s served for {ItemId} (range='{Range}')",
+            itemId, string.IsNullOrEmpty(range) ? "<none>" : range);
         return PhysicalFile(cached.SegmentPath, "video/iso.segment", enableRangeProcessing: true);
     }
 

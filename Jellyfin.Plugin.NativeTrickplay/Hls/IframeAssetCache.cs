@@ -88,7 +88,10 @@ public sealed class IframeAssetCache
     public IframeAsset? TryGetCached(Guid itemId)
     {
         if (_libraryManager.GetItemById(itemId) is not BaseItem item || string.IsNullOrEmpty(item.Path))
+        {
+            _logger.LogDebug("[NativeTrickplay] cache lookup miss for {ItemId}: item not found or has no path", itemId);
             return null;
+        }
 
         var dir = Path.Combine(GetCacheRoot(), itemId.ToString("N"));
         var playlistPath = Path.Combine(dir, "iframe.m3u8");
@@ -96,7 +99,12 @@ public sealed class IframeAssetCache
         var stampPath = Path.Combine(dir, ".source-mtime");
 
         if (!File.Exists(playlistPath) || !File.Exists(segmentPath) || !File.Exists(stampPath))
+        {
+            _logger.LogDebug(
+                "[NativeTrickplay] cache lookup miss for {ItemId}: files absent (playlist={HasPlaylist} segment={HasSegment} stamp={HasStamp})",
+                itemId, File.Exists(playlistPath), File.Exists(segmentPath), File.Exists(stampPath));
             return null;
+        }
 
         try
         {
@@ -104,20 +112,34 @@ public sealed class IframeAssetCache
             var stampContent = File.ReadAllText(stampPath);
             if (!ParseStamp(stampContent, out var stampedMtime, out var stampedEncoder)
                 || stampedMtime != sourceMtime.Ticks)
+            {
+                _logger.LogInformation(
+                    "[NativeTrickplay] cache invalidated for {ItemId} ({Name}): mtime mismatch (stamp={StampMtime} source={SourceMtime})",
+                    itemId, item.Name, stampedMtime, sourceMtime.Ticks);
                 return null;
+            }
 
             // Encoder must match the variant we'd produce now for this source —
             // catches v1.0→v1.1 upgrade where HDR items have stale SDR caches,
             // or any future format change.
             var expectedEncoder = IframeFormat.EncoderTag(IframeFormatFor(item));
             if (!string.Equals(stampedEncoder, expectedEncoder, StringComparison.Ordinal))
+            {
+                _logger.LogInformation(
+                    "[NativeTrickplay] cache invalidated for {ItemId} ({Name}): encoder tag mismatch (stamp='{StampEncoder}' expected='{ExpectedEncoder}')",
+                    itemId, item.Name, stampedEncoder, expectedEncoder);
                 return null;
+            }
 
             var template = File.ReadAllText(playlistPath);
+            _logger.LogDebug(
+                "[NativeTrickplay] cache HIT for {ItemId} ({Name}): playlist={PlaylistBytes}B encoder={Encoder}",
+                itemId, item.Name, template.Length, stampedEncoder);
             return new IframeAsset(template, segmentPath);
         }
-        catch (IOException)
+        catch (IOException ex)
         {
+            _logger.LogWarning(ex, "[NativeTrickplay] cache lookup IO error for {ItemId}", itemId);
             return null;
         }
     }
@@ -162,12 +184,17 @@ public sealed class IframeAssetCache
     /// </summary>
     public void Warmup(Guid itemId)
     {
+        _logger.LogInformation("[NativeTrickplay] warmup requested for {ItemId}", itemId);
         _ = GetOrCreateAsync(itemId).ContinueWith(t =>
         {
             if (t.IsFaulted)
             {
                 _logger.LogWarning(t.Exception?.GetBaseException(),
                     "[NativeTrickplay] warmup failed for {ItemId}", itemId);
+            }
+            else if (t.IsCompletedSuccessfully)
+            {
+                _logger.LogInformation("[NativeTrickplay] warmup completed for {ItemId}", itemId);
             }
         }, TaskScheduler.Default);
     }
@@ -248,6 +275,7 @@ public sealed class IframeAssetCache
         var sourceMtime = File.GetLastWriteTimeUtc(sourcePath);
         var variant = IframeFormatFor(item);
         var encoderTag = IframeFormat.EncoderTag(variant);
+        var sourceSize = new FileInfo(sourcePath).Length;
 
         var dir = Path.Combine(GetCacheRoot(), itemId.ToString("N"));
         Directory.CreateDirectory(dir);
@@ -264,27 +292,62 @@ public sealed class IframeAssetCache
                 && stampedMtime == sourceMtime.Ticks
                 && stampedEncoder == encoderTag)
             {
+                _logger.LogDebug(
+                    "[NativeTrickplay] GenerateAsync fast-path hit for {ItemId} ({Name})",
+                    itemId, item.Name);
                 return new IframeAsset(
                     await File.ReadAllTextAsync(playlistPath, ct).ConfigureAwait(false), segmentPath);
             }
         }
 
+        _logger.LogInformation(
+            "[NativeTrickplay] generation START for {ItemId} ({Name}): source={SourcePath} ({SourceMb} MiB), encoder={Encoder}, awaiting concurrency slot...",
+            itemId, item.Name, sourcePath, sourceSize / (1024 * 1024), encoderTag);
+
+        var slotWaitSw = Stopwatch.StartNew();
         await _globalLimit.WaitAsync(ct).ConfigureAwait(false);
+        slotWaitSw.Stop();
+        if (slotWaitSw.ElapsedMilliseconds > 100)
+        {
+            _logger.LogInformation(
+                "[NativeTrickplay] generation queued behind {WaitMs}ms wait for {ItemId}",
+                slotWaitSw.ElapsedMilliseconds, itemId);
+        }
         try
         {
             var tmpSegmentPath = segmentPath + ".tmp";
             if (File.Exists(tmpSegmentPath)) File.Delete(tmpSegmentPath);
 
+            var ffmpegSw = Stopwatch.StartNew();
             await RunFfmpegAsync(sourcePath, tmpSegmentPath, variant, ct).ConfigureAwait(false);
+            ffmpegSw.Stop();
+            var encodedBytes = File.Exists(tmpSegmentPath) ? new FileInfo(tmpSegmentPath).Length : 0;
+            _logger.LogInformation(
+                "[NativeTrickplay] ffmpeg encode finished for {ItemId} in {ElapsedMs}ms ({EncodedKb} KiB output)",
+                itemId, ffmpegSw.ElapsedMilliseconds, encodedBytes / 1024);
 
+            var scanSw = Stopwatch.StartNew();
             var (initSize, fragments) = Mp4BoxScanner.Scan(tmpSegmentPath);
+            scanSw.Stop();
             if (fragments.Count == 0)
             {
+                _logger.LogError(
+                    "[NativeTrickplay] box scan found 0 fragments in {Path} ({Bytes}B) — encoder produced no output",
+                    tmpSegmentPath, encodedBytes);
                 throw new InvalidOperationException("ffmpeg produced no fragments.");
             }
+            _logger.LogInformation(
+                "[NativeTrickplay] box scan for {ItemId} found {Fragments} fragments + init={InitBytes}B in {ElapsedMs}ms",
+                itemId, fragments.Count, initSize, scanSw.ElapsedMilliseconds);
 
+            var probeSw = Stopwatch.StartNew();
             var durations = await ProbePtsDeltasAsync(tmpSegmentPath, fragments.Count, ct).ConfigureAwait(false);
+            probeSw.Stop();
             var template = BuildPlaylist(initSize, fragments, durations);
+            var totalDuration = durations.Sum();
+            _logger.LogInformation(
+                "[NativeTrickplay] PTS probe for {ItemId} took {ElapsedMs}ms; total trickplay duration {DurationSec:F1}s, playlist={PlaylistBytes}B",
+                itemId, probeSw.ElapsedMilliseconds, totalDuration, template.Length);
 
             File.Move(tmpSegmentPath, segmentPath, overwrite: true);
             await File.WriteAllTextAsync(playlistPath, template, ct).ConfigureAwait(false);
@@ -292,9 +355,17 @@ public sealed class IframeAssetCache
                 .ConfigureAwait(false);
 
             _logger.LogInformation(
-                "[NativeTrickplay] generated {Frames} {Variant} I-frames for {ItemId}",
-                fragments.Count, encoderTag, itemId);
+                "[NativeTrickplay] generation DONE for {ItemId} ({Name}): {Frames} {Variant} I-frames, {EncodedMb} MiB, {Elapsed}ms total",
+                itemId, item.Name, fragments.Count, encoderTag, encodedBytes / (1024 * 1024),
+                ffmpegSw.ElapsedMilliseconds + scanSw.ElapsedMilliseconds + probeSw.ElapsedMilliseconds);
             return new IframeAsset(template, segmentPath);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex,
+                "[NativeTrickplay] generation FAILED for {ItemId} ({Name})",
+                itemId, item.Name);
+            throw;
         }
         finally
         {
@@ -305,15 +376,24 @@ public sealed class IframeAssetCache
     private async Task RunFfmpegAsync(string inputPath, string outputPath, IframeVariant variant, CancellationToken ct)
     {
         var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var isHdrSource = DetectHdrFromPath(inputPath);
 
         // First attempt: with hwaccel if configured.
         var hwaccelArgs = new List<string>();
         AppendHwaccelArgs(cfg, hwaccelArgs);
 
+        var primaryArgs = BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs, isHdrSource);
+        _logger.LogInformation(
+            "[NativeTrickplay] ffmpeg invoke (hwaccel={Hwaccel}, preset={Preset}, crf={Crf}, width={Width}, interval={Interval}s, sourceHdr={IsHdr})",
+            hwaccelArgs.Count > 0 ? string.Join(' ', hwaccelArgs) : "none",
+            cfg.IframePreset, cfg.IframeCrf, cfg.IframeWidth, cfg.IframeIntervalSeconds, isHdrSource);
+        _logger.LogDebug(
+            "[NativeTrickplay] ffmpeg cmd: {Encoder} {Args}",
+            _encoder.EncoderPath, string.Join(' ', primaryArgs));
+
         try
         {
-            await RunProcessAsync(_encoder.EncoderPath,
-                BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs), ct).ConfigureAwait(false);
+            await RunProcessAsync(_encoder.EncoderPath, primaryArgs, ct).ConfigureAwait(false);
             return;
         }
         catch (InvalidOperationException ex)
@@ -330,11 +410,56 @@ public sealed class IframeAssetCache
         }
 
         await RunProcessAsync(_encoder.EncoderPath,
-            BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs: null), ct).ConfigureAwait(false);
+            BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs: null, isHdrSource), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Quick HDR detection from the source file's container metadata. Uses
+    /// ffprobe to read the first video stream's color_transfer; values like
+    /// `smpte2084` (PQ) or `arib-std-b67` (HLG) signal HDR. Falls back to false
+    /// (treat as SDR) on any error — branching to the SDR encoder path for an
+    /// HDR source would just produce slightly-washed-out thumbnails, but
+    /// branching to HDR for SDR fails with zscale "no path between colorspaces".
+    /// </summary>
+    private bool DetectHdrFromPath(string inputPath)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = _encoder.ProbePath,
+                ArgumentList =
+                {
+                    "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=color_transfer",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    inputPath,
+                },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null) return false;
+            if (!proc.WaitForExit(3000))
+            {
+                proc.Kill(entireProcessTree: true);
+                return false;
+            }
+            var transfer = proc.StandardOutput.ReadToEnd().Trim().ToLowerInvariant();
+            return transfer is "smpte2084" or "arib-std-b67";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[NativeTrickplay] HDR detection failed for {Path}, treating as SDR", inputPath);
+            return false;
+        }
     }
 
     private static List<string> BuildFfmpegArgs(
-        PluginConfiguration cfg, string inputPath, string outputPath, IframeVariant variant, IReadOnlyList<string>? hwaccelArgs)
+        PluginConfiguration cfg, string inputPath, string outputPath, IframeVariant variant, IReadOnlyList<string>? hwaccelArgs, bool isHdrSource)
     {
         var args = new List<string>(48)
         {
@@ -350,62 +475,90 @@ public sealed class IframeAssetCache
         if (hwaccelArgs is { Count: > 0 }) args.AddRange(hwaccelArgs);
 
         var width = cfg.IframeWidth.ToString(CultureInfo.InvariantCulture);
+        var interval = cfg.IframeIntervalSeconds <= 0 ? 1.0 : cfg.IframeIntervalSeconds;
+        var fps = (1.0 / interval).ToString("0.######", CultureInfo.InvariantCulture);
+        var intervalStr = interval.ToString("0.######", CultureInfo.InvariantCulture);
 
         args.AddRange(new[]
         {
-            "-skip_frame", "nokey",
             "-i", inputPath,
-            "-an", "-sn",
-            "-fps_mode", "passthrough",
+            // Track / metadata stripping. AVPlayer's I-frame variant decoder
+            // silently rejects fMP4 init segments whose moov box contains
+            // anything other than a single video track — the playlist
+            // downloads but no segments are ever fetched, manifesting as
+            // "thumbnail only at the current playhead".
+            //
+            // `-map 0:v:0 -an -sn -dn` is necessary but NOT sufficient: the
+            // mp4 muxer auto-rewrites source chapters into a `text` data
+            // track on the output side regardless of input mapping. To get a
+            // clean video-only mdhd, also nuke chapters and global metadata.
+            "-map", "0:v:0",
+            "-an", "-sn", "-dn",
+            "-map_chapters", "-1",
+            "-map_metadata", "-1",
         });
 
-        if (variant == IframeVariant.Sdr)
+        // Always SDR H.264 Main Level 4.0 per Apple HLS Authoring Spec §6.16
+        // ("SDR trick play streams MUST be provided"). The CODECS string in
+        // the I-FRAME-STREAM-INF line is `avc1.4d0028` — pinning -level:v 4.0
+        // makes the encoder's emitted level_idc match exactly. AVPlayer
+        // strictly validates declared-vs-actual; a level mismatch makes it
+        // silently bypass the I-frame variant (playlist downloads OK,
+        // segments never fetched).
+        //
+        // For HDR/DV sources (PQ or HLG), we ALSO must convert the bitstream's
+        // color metadata to SDR BT.709, not just downscale 10→8 bit. Without
+        // tone-mapping, ffmpeg passes through the source's `color_transfer=
+        // smpte2084 / color_primaries=bt2020` tags into the H.264 VUI — so
+        // the bitstream claims to be PQ HDR while the playlist declares
+        // VIDEO-RANGE=SDR. AVPlayer parses init+first I-frame, sees the
+        // bitstream/manifest disagree, and silently abandons the variant
+        // (manifesting as "thumbnail only at the current playhead" for HDR
+        // primaries — exactly the symptom v1.1.6 still had).
+        //
+        // For HDR sources: zscale + tonemap chain converts BT.2020/PQ→BT.709
+        // with the Hable operator. For SDR sources: this chain throws "no path
+        // between colorspaces" because the linear-light intermediate (npl=100)
+        // is only defined for PQ-curve input. Branching is mandatory; the
+        // chain is NOT safe to apply unconditionally despite earlier intuition
+        // (v1.1.8 broke every SDR encode in the library).
+        //
+        // The fps filter thins the decoded stream to 1/interval Hz before the
+        // encoder sees it, so trickplay density is uniform regardless of the
+        // source's GOP layout. x264's keyint=1 then makes every (thinned)
+        // output frame an IDR. Unlike x265, x264 honors keyint=1 cleanly
+        // without flipping into a profile Apple decoders reject.
+        var filterChain = isHdrSource
+            ? $"fps={fps}," +
+              "zscale=t=linear:npl=100," +
+              "format=gbrpf32le," +
+              "zscale=p=bt709," +
+              "tonemap=tonemap=hable:desat=0," +
+              "zscale=t=bt709:m=bt709:r=tv," +
+              "format=yuv420p," +
+              $"scale=-2:{width}"
+            : $"fps={fps},scale=-2:{width},format=yuv420p";
+        // x264-params color overrides are required: ffmpeg's -color_* output
+        // flags set the AVStream metadata but x264 only embeds primaries /
+        // transfer / matrix into the H.264 VUI when its own params are given
+        // explicitly. Without this, color_transfer/primaries come out as
+        // "unknown" in the bitstream VUI, defeating AVPlayer's variant-vs-
+        // primary range-family check.
+        args.AddRange(new[]
         {
-            // SDR: 8-bit H.264 Main 3.0. Universal Apple TV decode, fast encode.
-            args.AddRange(new[]
-            {
-                "-vf", $"scale=-2:{width},format=yuv420p",
-                "-c:v", "libx264",
-                "-preset", cfg.IframePreset,
-                "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
-                "-profile:v", "main", "-level:v", "3.0",
-                "-x264-params", "keyint=1:scenecut=0:open-gop=0",
-            });
-        }
-        else
-        {
-            // HDR: 10-bit HEVC Main10 with PQ or HLG signaling so AVPlayer
-            // accepts the I-frame variant alongside HDR primaries (Apple HLS
-            // Authoring Spec §4.4.4 — variant VIDEO-RANGE must match family).
-            //
-            // -tag:v hvc1 is critical: Apple players only honor `hvc1`-tagged
-            // HEVC; `hev1` (in-band parameter sets) won't initialize the decoder.
-            //
-            // CRITICAL: do NOT pass keyint=1 to x265-params. x265 detects all-
-            // keyframe output and switches to "Main 10 Intra" profile, which is
-            // HEVC profile_idc=4 (Range Extensions / Rext) in the bitstream
-            // classification — Apple HEVC decoders only accept Main and Main10
-            // (profile_idc=2). Output of a Rext-tagged bitstream causes
-            // AVPlayer to reject the master.
-            //
-            // Instead: drive keyframes from ffmpeg's side via
-            // -force_key_frames "expr:1" (every frame is a keyframe), which x265
-            // doesn't recognize as Intra-profile mode → emits standard Main10.
-            var transfer = variant == IframeVariant.HdrHlg ? "arib-std-b67" : "smpte2084";
-            var hdrFlag = variant == IframeVariant.HdrPq ? ":hdr10=1" : string.Empty;
-            args.AddRange(new[]
-            {
-                "-vf", $"scale=-2:{width},format=yuv420p10le",
-                "-c:v", "libx265",
-                "-preset", cfg.IframePreset,
-                "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
-                "-profile:v", "main10",
-                "-tag:v", "hvc1",
-                "-force_key_frames", "expr:1",
-                "-x265-params",
-                $"colorprim=bt2020:transfer={transfer}:colormatrix=bt2020nc{hdrFlag}:repeat-headers=1:scenecut=0:log-level=error",
-            });
-        }
+            "-vf", filterChain,
+            "-c:v", "libx264",
+            "-preset", cfg.IframePreset,
+            "-crf", cfg.IframeCrf.ToString(CultureInfo.InvariantCulture),
+            "-profile:v", "main", "-level:v", "4.0",
+            "-x264-params", "keyint=1:scenecut=0:open-gop=0:colorprim=bt709:transfer=bt709:colormatrix=bt709",
+            "-color_primaries", "bt709",
+            "-color_trc", "bt709",
+            "-colorspace", "bt709",
+            "-color_range", "tv",
+        });
+        _ = variant; // single variant — kept in API for callers; intentionally unused here
+        _ = intervalStr;
 
         args.AddRange(new[]
         {

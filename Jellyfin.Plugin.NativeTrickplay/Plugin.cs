@@ -21,6 +21,14 @@ public class PluginConfiguration : BasePluginConfiguration
     public int IframeCrf { get; set; } = 32;
     public string IframePreset { get; set; } = "ultrafast";
     public int MaxConcurrentGenerations { get; set; } = 1;
+
+    /// <summary>
+    /// Seconds between trickplay thumbnails. 1.0 = one I-frame per second of
+    /// source (smooth scrubbing UX, ~30 MB cache for a 24-min episode at 320p).
+    /// Larger values trade scrubbing granularity for cache size — set to e.g.
+    /// 5.0 if disk space is tight. Must be &gt;= 1.0.
+    /// </summary>
+    public double IframeIntervalSeconds { get; set; } = 1.0;
     /// <summary>
     /// When true, follows Jellyfin's global "Hardware Acceleration" setting
     /// (Dashboard → Playback → Transcoding) and adds the appropriate

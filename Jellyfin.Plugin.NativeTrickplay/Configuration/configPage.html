@@ -31,6 +31,11 @@
                     <label class="inputLabel" for="IframeCrf">CRF (encoder quality, lower=better; 18-32 typical)</label>
                     <input id="IframeCrf" type="number" is="emby-input" min="18" max="40" />
                 </div>
+                <div class="inputContainer">
+                    <label class="inputLabel" for="IframeIntervalSeconds">Thumbnail interval (seconds between scrubbing thumbnails)</label>
+                    <input id="IframeIntervalSeconds" type="number" is="emby-input" min="1" max="60" step="1" />
+                    <div class="fieldDescription">1 = one thumbnail per second of source (smoothest scrubbing, ~30 MB cache for a 25-min episode at 320p). Increase to 5 or 10 if disk space matters more than scrubbing granularity.</div>
+                </div>
                 <div class="checkboxContainer">
                     <label>
                         <input id="UseHardwareDecoding" type="checkbox" is="emby-checkbox" />
@@ -77,6 +82,7 @@
                 document.querySelector('#Enabled').checked = cfg.Enabled;
                 document.querySelector('#IframeWidth').value = cfg.IframeWidth;
                 document.querySelector('#IframeCrf').value = cfg.IframeCrf;
+                document.querySelector('#IframeIntervalSeconds').value = cfg.IframeIntervalSeconds;
                 document.querySelector('#UseHardwareDecoding').checked = cfg.UseHardwareDecoding;
                 document.querySelector('#CacheDirectory').value = cfg.CacheDirectory || '';
                 document.querySelector('#PruneOrphans').checked = cfg.PruneOrphans;
@@ -90,6 +96,7 @@
                 cfg.Enabled = document.querySelector('#Enabled').checked;
                 cfg.IframeWidth = parseInt(document.querySelector('#IframeWidth').value, 10);
                 cfg.IframeCrf = parseInt(document.querySelector('#IframeCrf').value, 10);
+                cfg.IframeIntervalSeconds = parseFloat(document.querySelector('#IframeIntervalSeconds').value);
                 cfg.UseHardwareDecoding = document.querySelector('#UseHardwareDecoding').checked;
                 cfg.CacheDirectory = (document.querySelector('#CacheDirectory').value || '').trim();
                 cfg.PruneOrphans = document.querySelector('#PruneOrphans').checked;

@@ -31,7 +31,12 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 {
     private const string SkipMarker = "skipIframeInjection";
     private const string IframeMarker = "#EXT-X-I-FRAME-STREAM-INF";
-    private const long IframeBandwidth = 200_000;
+    // Conservative declared peak. Apple's spec table (§6.7) puts a 1080p H.264
+    // 1fps I-frame variant around 580 kbps; 480p / 720p land much lower.
+    // Declaring 1 Mbps comfortably covers any segment peak our encoder produces
+    // at typical IframeWidth (320–720) without violating the "measured peak <
+    // 110% of BANDWIDTH" tolerance from the spec.
+    private const long IframeBandwidth = 1_000_000;
 
     private readonly ILibraryManager _libraryManager;
     private readonly IframeAssetCache _cache;
@@ -64,9 +69,14 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 
         if (!TryExtractItemId(path, out var itemId))
         {
+            _logger.LogDebug("[NativeTrickplay] injector: could not parse itemId from {Path}", path);
             await next().ConfigureAwait(false);
             return;
         }
+
+        _logger.LogDebug(
+            "[NativeTrickplay] injector intercepting {Path}{Query} (item={ItemId})",
+            path, http.Request.QueryString.Value, itemId);
 
         var origBody = http.Response.Body;
         using var buffer = new MemoryStream();
@@ -81,6 +91,9 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             if (buffer.Length == 0
                 || (http.Response.StatusCode != 200 && http.Response.StatusCode != 206))
             {
+                _logger.LogDebug(
+                    "[NativeTrickplay] injector: pass-through for {ItemId} (status={Status} bodyLen={Bytes})",
+                    itemId, http.Response.StatusCode, buffer.Length);
                 buffer.Position = 0;
                 await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                 return;
@@ -89,6 +102,9 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             var bodyText = Encoding.UTF8.GetString(buffer.ToArray());
             if (!bodyText.StartsWith("#EXTM3U", StringComparison.Ordinal))
             {
+                _logger.LogDebug(
+                    "[NativeTrickplay] injector: pass-through for {ItemId} (body not an HLS playlist)",
+                    itemId);
                 buffer.Position = 0;
                 await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                 return;
@@ -102,32 +118,46 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             {
                 if (bodyText.Contains(IframeMarker, StringComparison.Ordinal))
                 {
-                    // Already advertises an I-frame variant — pass through.
+                    _logger.LogInformation(
+                        "[NativeTrickplay] injector: master.m3u8 for {ItemId} already has I-FRAME-STREAM-INF — pass-through",
+                        itemId);
                     buffer.Position = 0;
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                     return;
                 }
                 if (!TryAppendIframeVariant(bodyText, itemId, http.Request.QueryString.Value ?? string.Empty, out transformed))
                 {
-                    // Couldn't determine the iframe variant for this item — pass through.
+                    _logger.LogWarning(
+                        "[NativeTrickplay] injector: cannot append I-FRAME variant for {ItemId} (item or media stream missing) — pass-through",
+                        itemId);
                     buffer.Position = 0;
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                     return;
                 }
+                _logger.LogInformation(
+                    "[NativeTrickplay] injector: appended I-FRAME variant to master.m3u8 for {ItemId} ({Bytes}B → {NewBytes}B)",
+                    itemId, bodyText.Length, transformed.Length);
             }
             else if (isMediaContent && isMain)
             {
                 if (!TryWrapAsMaster(itemId, http.Request, out transformed))
                 {
-                    // Couldn't determine the right STREAM-INF safely; pass through unchanged
-                    // so we never break playback.
+                    _logger.LogInformation(
+                        "[NativeTrickplay] injector: NOT wrapping main.m3u8 for {ItemId} (HDR pass-through, no metadata, or already-handled client)",
+                        itemId);
                     buffer.Position = 0;
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                     return;
                 }
+                _logger.LogInformation(
+                    "[NativeTrickplay] injector: wrapped main.m3u8 as synthetic master for {ItemId} ({Bytes}B → {NewBytes}B)",
+                    itemId, bodyText.Length, transformed.Length);
             }
             else
             {
+                _logger.LogDebug(
+                    "[NativeTrickplay] injector: pass-through for {ItemId} (path={Path}, has-stream-inf={HasStreamInf}, has-extinf={HasExtinf})",
+                    itemId, path, isMasterContent, isMediaContent);
                 buffer.Position = 0;
                 await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                 return;
@@ -170,7 +200,10 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         if (item is null) return false;
 
         var variant = _cache.IframeFormatFor(item);
-        var iframeLine = BuildIframeStreamInfLine(itemId, queryString, variant);
+        // Look up source dimensions so the I-FRAME-STREAM-INF can declare an
+        // accurate RESOLUTION matching what the encoder actually outputs.
+        var (w, h) = GetIframeOutputDimensions(item);
+        var iframeLine = BuildIframeStreamInfLine(itemId, queryString, variant, w, h);
 
         var sb = new StringBuilder(master.Length + iframeLine.Length + 2);
         sb.Append(master);
@@ -180,15 +213,34 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         return true;
     }
 
-    private static string BuildIframeStreamInfLine(Guid itemId, string queryString, IframeVariant variant)
+    private (int Width, int Height) GetIframeOutputDimensions(BaseItem item)
     {
-        // The I-frame variant's VIDEO-RANGE family must match the primary's, or
-        // AVPlayer rejects the master. CodecString + VideoRangeAttribute keep
-        // them aligned with what the cache actually encodes for that source.
+        var sources = item.GetMediaSources(false);
+        var video = sources?.FirstOrDefault()?.MediaStreams?.FirstOrDefault(s => s.Type == MediaStreamType.Video);
+        var cfgHeight = Plugin.Instance?.Configuration.IframeWidth ?? 320;
+        if (video?.Width is not > 0 || video.Height is not > 0)
+        {
+            // Source dimensions unknown — emit a conservative 16:9 fallback.
+            return (RoundEven((cfgHeight * 16) / 9), cfgHeight);
+        }
+        var aspect = (double)video.Width.Value / video.Height.Value;
+        var outW = RoundEven((int)Math.Round(cfgHeight * aspect));
+        return (outW, cfgHeight);
+    }
+
+    private static int RoundEven(int n) => (n / 2) * 2;
+
+    private static string BuildIframeStreamInfLine(
+        Guid itemId, string queryString, IframeVariant variant, int width, int height)
+    {
+        // Per Apple HLS Authoring Spec §6.16 the I-frame variant uses an SDR
+        // H.264 codec string regardless of the primary's range. CodecString and
+        // VideoRangeAttribute return the same values whether the source is SDR
+        // or HDR (always avc1.4d0028 / SDR) — see IframeFormat.cs for why.
         var codec = IframeFormat.CodecString(variant);
         var range = IframeFormat.VideoRangeAttribute(variant);
         return string.Create(CultureInfo.InvariantCulture,
-            $"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH={IframeBandwidth},VIDEO-RANGE={range},CODECS=\"{codec}\",URI=\"/Videos/{itemId:N}/iframe.m3u8{queryString}\"");
+            $"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH={IframeBandwidth},AVERAGE-BANDWIDTH={IframeBandwidth},VIDEO-RANGE={range},CODECS=\"{codec}\",RESOLUTION={width}x{height},URI=\"/Videos/{itemId:N}/iframe.m3u8{queryString}\"");
     }
 
     /// <summary>
@@ -204,7 +256,11 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         output = string.Empty;
 
         var item = _libraryManager.GetItemById(itemId);
-        if (item is null) return false;
+        if (item is null)
+        {
+            _logger.LogDebug("[NativeTrickplay] TryWrapAsMaster: item {ItemId} not in library", itemId);
+            return false;
+        }
 
         var msId = req.Query["MediaSourceId"].FirstOrDefault();
         var sources = item.GetMediaSources(false);
@@ -217,7 +273,11 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         var video = streams?.FirstOrDefault(s => s.Type == MediaStreamType.Video);
         var audio = streams?.FirstOrDefault(s => s.Type == MediaStreamType.Audio);
 
-        if (video is null) return false; // can't safely synthesize without video stream metadata
+        if (video is null)
+        {
+            _logger.LogDebug("[NativeTrickplay] TryWrapAsMaster: no video stream for {ItemId}", itemId);
+            return false;
+        }
 
         // HDR/DV main.m3u8 fetches: pass through unchanged. HDR-aware clients
         // (e.g. JellySeerTV's HDR-Filter) build their own synthetic master
@@ -229,11 +289,15 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         // restructuring), not through main.m3u8 wrapping.
         if (video.VideoRangeType is not (VideoRangeType.SDR or VideoRangeType.Unknown))
         {
+            _logger.LogDebug(
+                "[NativeTrickplay] TryWrapAsMaster: skipping HDR/DV item {ItemId} (range={Range}) — client is expected to wrap",
+                itemId, video.VideoRangeType);
             return false;
         }
 
         var ci = CultureInfo.InvariantCulture;
         var iframeVariant = IframeFormat.FromVideoRange(video.VideoRangeType);
+        var (iframeW, iframeH) = GetIframeOutputDimensions(item);
 
         var origQs = req.QueryString.Value ?? string.Empty;
         var innerQs = AppendQueryParam(origQs, SkipMarker, "1");
@@ -280,9 +344,13 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         sb.AppendLine();
         sb.Append("main.m3u8").Append(innerQs).AppendLine();
 
-        sb.AppendLine(BuildIframeStreamInfLine(itemId, origQs, iframeVariant));
+        var iframeLine = BuildIframeStreamInfLine(itemId, origQs, iframeVariant, iframeW, iframeH);
+        sb.AppendLine(iframeLine);
 
         output = sb.ToString();
+        _logger.LogDebug(
+            "[NativeTrickplay] TryWrapAsMaster: built synthetic master for {ItemId} (primary CODECS=\"{VideoCodec},{AudioCodec}\", I-frame line: {IframeLine})",
+            itemId, videoCodec, audioCodec, iframeLine);
         return true;
     }
 

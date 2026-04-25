@@ -71,8 +71,40 @@ public sealed class PruneTrickplayCacheTask : IScheduledTask
             snapshot.Count, totalBytes / (1024 * 1024));
 
         var evicted = new HashSet<Guid>();
-        int orphans = 0, aged = 0, capped = 0;
-        long orphanBytes = 0, agedBytes = 0, cappedBytes = 0;
+        int stale = 0, orphans = 0, aged = 0, capped = 0;
+        long staleBytes = 0, orphanBytes = 0, agedBytes = 0, cappedBytes = 0;
+
+        // Phase 0: stale-encoder / corrupt-cache eviction. After any encoder
+        // pipeline change (encoder tag bump in IframeFormat.cs, source file
+        // mtime change, half-written cache from a crashed encode, etc.),
+        // TryGetCached returns null for the entry — meaning playback would
+        // silently re-encode anyway, but the broken files keep wasting disk
+        // space until the next pre-gen sweeps in. Evicting them up-front lets
+        // the user see disk space drop and regenerate cleanly.
+        //
+        // TryEvict is in-flight-aware (it skips items currently being
+        // encoded), so concurrent regeneration is safe.
+        for (int i = 0; i < snapshot.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var entry = snapshot[i];
+            // Item still in library AND TryGetCached returns non-null = healthy.
+            // If item is gone, Phase 1 will pick it up. We only act on
+            // "still in library but cache invalid" here.
+            if (_libraryManager.GetItemById(entry.ItemId) is null) continue;
+            if (_cache.TryGetCached(entry.ItemId) is not null) continue;
+
+            if (_cache.TryEvict(entry.ItemId))
+            {
+                evicted.Add(entry.ItemId);
+                stale++;
+                staleBytes += entry.SizeBytes;
+            }
+        }
+        _logger.LogInformation(
+            "[NativeTrickplay] phase 0 (stale encoder / corrupt): evicted {Count} ({SizeMb} MB)",
+            stale, staleBytes / (1024 * 1024));
 
         // Phase 1: orphan removal — fast, no policy knobs (you almost never want to keep them).
         if (cfg.PruneOrphans)
@@ -166,11 +198,12 @@ public sealed class PruneTrickplayCacheTask : IScheduledTask
         }
 
         progress.Report(100);
-        long postBytes = totalBytes - orphanBytes - agedBytes - cappedBytes;
+        long evictedBytes = staleBytes + orphanBytes + agedBytes + cappedBytes;
+        long postBytes = totalBytes - evictedBytes;
         int postCount = snapshot.Count - evicted.Count;
         _logger.LogInformation(
             "[NativeTrickplay] prune done: evicted {EvictCount} ({EvictMb} MB); kept {KeepCount} ({KeepMb} MB)",
-            evicted.Count, (orphanBytes + agedBytes + cappedBytes) / (1024 * 1024),
+            evicted.Count, evictedBytes / (1024 * 1024),
             postCount, postBytes / (1024 * 1024));
 
         return Task.CompletedTask;
