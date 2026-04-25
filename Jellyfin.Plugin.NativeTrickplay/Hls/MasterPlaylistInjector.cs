@@ -200,8 +200,13 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         var innerQs = AppendQueryParam(origQs, SkipMarker, "1");
 
         long bandwidth = ms?.Bitrate ?? video.BitRate ?? 8_000_000;
-        string videoCodec = BuildVideoCodecString(video);
-        string audioCodec = BuildAudioCodecString(audio);
+        // CRITICAL: codec strings must reflect what main.m3u8 actually serves,
+        // NOT the source codec. Jellyfin transcodes DTS → AC-3, sometimes
+        // converts h264 profile, etc. The URL's AudioCodec / VideoCodec query
+        // params carry the negotiated target codec — that's what AVPlayer
+        // will see in the segments, so that's what goes in STREAM-INF.
+        string videoCodec = BuildVideoCodecString(video, req.Query);
+        string audioCodec = BuildAudioCodecStringFromUrl(req.Query, audio);
         string? videoRange = MapVideoRange(video.VideoRangeType);
         int? width = video.Width;
         int? height = video.Height;
@@ -251,13 +256,33 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         return queryString + sep + key + "=" + Uri.EscapeDataString(value);
     }
 
-    private static string BuildVideoCodecString(MediaStream video)
+    private static string BuildVideoCodecString(MediaStream video, IQueryCollection query)
     {
         var ci = CultureInfo.InvariantCulture;
-        var codec = (video.Codec ?? string.Empty).ToLowerInvariant();
-        var bitDepth = video.BitDepth ?? 8;
-        var profile = (video.Profile ?? string.Empty).ToLowerInvariant();
-        var level = (int)Math.Round(video.Level ?? 0.0);
+
+        // Pick the codec from the URL (target after Jellyfin negotiation), not the
+        // source. Jellyfin sends VideoCodec=hevc,h264 as a preference list; the
+        // actual chosen codec is the one that has matching <codec>-level hints
+        // in the URL.
+        var urlList = (query["VideoCodec"].FirstOrDefault() ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries);
+        string? targetCodec = null;
+        foreach (var c in urlList)
+        {
+            var name = c.Trim().ToLowerInvariant();
+            if (query.ContainsKey(name + "-level")) { targetCodec = name; break; }
+        }
+        // Fallbacks: first codec in list, then source MediaStream's codec.
+        targetCodec ??= urlList.FirstOrDefault()?.Trim().ToLowerInvariant();
+        targetCodec ??= (video.Codec ?? string.Empty).ToLowerInvariant();
+
+        var codec = targetCodec;
+        // Pull profile/level/bit-depth either from URL hints (target) or stream (source).
+        int level = TryParseInt(query[$"{codec}-level"].FirstOrDefault(), 0);
+        if (level == 0) level = (int)Math.Round(video.Level ?? 0.0);
+        var profile = (query[$"{codec}-profile"].FirstOrDefault() ?? video.Profile ?? string.Empty).ToLowerInvariant();
+        var bitDepthStr = query[$"{codec}-videobitdepth"].FirstOrDefault();
+        var bitDepth = int.TryParse(bitDepthStr, out var bd) ? bd : (video.BitDepth ?? 8);
 
         if (codec is "hevc" or "h265")
         {
@@ -288,10 +313,20 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         return string.Create(ci, $"avc1.{profileIdc264:X2}{compat264:X2}{level264:X2}");
     }
 
-    private static string BuildAudioCodecString(MediaStream? audio)
+    private static string BuildAudioCodecStringFromUrl(IQueryCollection query, MediaStream? sourceAudio)
     {
-        if (audio is null) return "mp4a.40.2";
-        var codec = (audio.Codec ?? string.Empty).ToLowerInvariant();
+        // Prefer the negotiated target codec from the URL. Jellyfin transcodes
+        // unsupported audio (DTS, TrueHD raw, etc.) to AC-3/AAC for AVPlayer
+        // — declaring the source codec in STREAM-INF makes AVPlayer reject the
+        // variant. The URL's AudioCodec param is the actual delivered codec.
+        var urlAudio = (query["AudioCodec"].FirstOrDefault() ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault()?.Trim().ToLowerInvariant();
+
+        var codec = string.IsNullOrEmpty(urlAudio)
+            ? (sourceAudio?.Codec ?? string.Empty).ToLowerInvariant()
+            : urlAudio;
+
         return codec switch
         {
             "eac3" => "ec-3",
@@ -299,11 +334,17 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             "flac" => "fLaC",
             "alac" => "alac",
             "opus" => "opus",
-            "truehd" or "mlpa" => "mlpa",
-            "dts" => "dts",
+            // Any other (dts, truehd, mlpa, vorbis, etc.) — AVPlayer can't decode
+            // these natively, so Jellyfin transcodes. If we end up here without an
+            // explicit URL hint, declare AAC as a safe lowest-common-denominator;
+            // even if the actual segment audio is AC-3/E-AC-3, AVPlayer fetches
+            // the variant and re-probes the bitstream.
             _ => "mp4a.40.2"
         };
     }
+
+    private static int TryParseInt(string? s, int fallback) =>
+        int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : fallback;
 
     private static string? MapVideoRange(VideoRangeType type) => type switch
     {
