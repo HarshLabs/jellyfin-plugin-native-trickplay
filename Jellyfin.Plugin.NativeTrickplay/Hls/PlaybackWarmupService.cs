@@ -109,7 +109,11 @@ public sealed class PlaybackWarmupService : IHostedService, IDisposable
             // miss path during the 30-second window.
             if (_cache.TryGetCached(itemId) is not null) return;
 
-            _cache.Warmup(itemId);
+            // Playback is active for this item — mark High priority so the
+            // encode leapfrogs any in-flight bulk/admin queue. Without this,
+            // a user who clicks Play in the middle of a library-wide
+            // pre-gen would wait behind every other item.
+            _cache.Warmup(itemId, isPriority: true);
         }, _shutdownCts.Token);
     }
 }

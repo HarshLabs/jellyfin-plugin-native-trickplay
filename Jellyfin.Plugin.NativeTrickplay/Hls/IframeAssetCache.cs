@@ -49,7 +49,24 @@ public sealed class IframeAssetCache
     // sync. Holds runtime state (status + .tmp size) that the admin endpoint
     // can return without poking into Lazy<Task> internals.
     private readonly ConcurrentDictionary<string, InflightProgress> _inflightProgress = new();
-    private readonly SemaphoreSlim _globalLimit;
+
+    // Priority-aware slot manager. Replaces a plain SemaphoreSlim because
+    // the user wants playback-triggered encodes to leapfrog a long
+    // bulk-generate queue (e.g. "I just clicked Play; I don't want to
+    // wait for the other 199 items to encode first"). Non-preemptive:
+    // the currently-running encode finishes naturally, and pending High
+    // items move to the front of the wait queue ahead of pending Normal
+    // items.
+    private readonly object _slotLock = new();
+    private int _slotsAvailable;
+    private readonly List<WaitNode> _waitQueue = new();
+    private long _waitSequence;
+
+    private const int PriorityHigh = 100;   // playback / scrub triggers
+    private const int PriorityNormal = 50;  // admin Generate, pre-gen task
+    private const int PriorityLow = 10;     // startup resume scan
+
+    private sealed record WaitNode(int Priority, TaskCompletionSource<bool> Tcs, Guid ItemId, long Sequence);
 
     private sealed class InflightProgress
     {
@@ -75,7 +92,101 @@ public sealed class IframeAssetCache
         _serverConfig = serverConfig;
         _lifetime = lifetime;
         var max = Plugin.Instance?.Configuration.MaxConcurrentGenerations ?? 1;
-        _globalLimit = new SemaphoreSlim(Math.Max(1, max));
+        _slotsAvailable = Math.Max(1, max);
+    }
+
+    /// <summary>
+    /// Acquire one of the limited encoder slots, honoring priority. High-
+    /// priority callers (playback / scrub) leapfrog Normal-priority callers
+    /// (admin Generate, pre-gen task) and Low-priority (startup resume).
+    /// Non-preemptive: a slot that's already encoding stays with that
+    /// encode until it finishes; priority only affects WHO gets the next
+    /// slot when one frees up.
+    /// </summary>
+    private async Task AcquireSlotAsync(int priority, Guid itemId, CancellationToken ct)
+    {
+        TaskCompletionSource<bool> tcs;
+        WaitNode node;
+        lock (_slotLock)
+        {
+            if (_slotsAvailable > 0 && _waitQueue.Count == 0)
+            {
+                _slotsAvailable--;
+                return;
+            }
+            tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            node = new WaitNode(priority, tcs, itemId, Interlocked.Increment(ref _waitSequence));
+            _waitQueue.Add(node);
+            ReorderQueueLocked();
+        }
+        using var reg = ct.Register(() =>
+        {
+            lock (_slotLock) { _waitQueue.Remove(node); }
+            tcs.TrySetCanceled(ct);
+        });
+        await tcs.Task.ConfigureAwait(false);
+    }
+
+    private void ReleaseSlot()
+    {
+        TaskCompletionSource<bool>? hand = null;
+        lock (_slotLock)
+        {
+            // Pick the highest-priority, oldest-sequence waiter that
+            // hasn't been canceled. Skip any canceled stragglers.
+            while (_waitQueue.Count > 0)
+            {
+                var head = _waitQueue[0];
+                _waitQueue.RemoveAt(0);
+                if (!head.Tcs.Task.IsCanceled)
+                {
+                    hand = head.Tcs;
+                    break;
+                }
+            }
+            if (hand == null) _slotsAvailable++;
+        }
+        hand?.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// Promote a queued item from a lower priority to High. No-op if the
+    /// item isn't currently waiting (already running, never queued, or
+    /// already at High priority). Used when a High-priority Warmup
+    /// arrives for an item that's already queued at Normal priority —
+    /// e.g. user kicked off a bulk library encode then clicked Play on
+    /// one of those items.
+    /// </summary>
+    private void PromoteToPriority(Guid itemId, int newPriority = PriorityHigh)
+    {
+        lock (_slotLock)
+        {
+            for (int i = 0; i < _waitQueue.Count; i++)
+            {
+                var w = _waitQueue[i];
+                if (w.ItemId == itemId && w.Priority < newPriority)
+                {
+                    _waitQueue[i] = w with { Priority = newPriority };
+                    ReorderQueueLocked();
+                    _logger.LogInformation(
+                        "[NativeTrickplay] queue: promoted {ItemId} to priority {Priority}",
+                        itemId, newPriority);
+                    return;
+                }
+            }
+        }
+    }
+
+    private void ReorderQueueLocked()
+    {
+        // Stable priority sort: descending priority, ascending sequence
+        // within the same priority so original submission order is
+        // preserved among same-priority items.
+        _waitQueue.Sort((a, b) =>
+        {
+            var byPrio = b.Priority.CompareTo(a.Priority);
+            return byPrio != 0 ? byPrio : a.Sequence.CompareTo(b.Sequence);
+        });
     }
 
     /// <summary>
@@ -220,10 +331,24 @@ public sealed class IframeAssetCache
     /// in-flight Lazy dictionary. Safe to call from event handlers
     /// (PlaybackStart, etc) where we do not want to block.
     /// </summary>
-    public void Warmup(Guid itemId)
+    public void Warmup(Guid itemId) => Warmup(itemId, isPriority: false);
+
+    /// <summary>
+    /// Fire-and-forget warmup with priority hint. <paramref name="isPriority"/>
+    /// =true marks the encode as playback-relevant so it leapfrogs any
+    /// pending bulk/background work in the queue. If the item is already
+    /// queued at a lower priority when this is called, it gets promoted
+    /// in-place — the user clicking Play on item #150 of a 200-item bulk
+    /// library encode moves that item to the front instead of waiting
+    /// behind 149 others.
+    /// </summary>
+    public void Warmup(Guid itemId, bool isPriority)
     {
-        _logger.LogInformation("[NativeTrickplay] warmup requested for {ItemId}", itemId);
-        _ = GetOrCreateAsync(itemId).ContinueWith(t =>
+        _logger.LogInformation(
+            "[NativeTrickplay] warmup requested for {ItemId} (priority={Priority})",
+            itemId, isPriority ? "high" : "normal");
+        if (isPriority) PromoteToPriority(itemId);
+        _ = GetOrCreateAsync(itemId, isPriority).ContinueWith(t =>
         {
             if (t.IsFaulted)
             {
@@ -244,12 +369,22 @@ public sealed class IframeAssetCache
     /// timeout on the slow first manifest fetch would kill ffmpeg, leaving the
     /// asset perpetually broken.
     /// </summary>
-    public Task<IframeAsset> GetOrCreateAsync(Guid itemId)
+    public Task<IframeAsset> GetOrCreateAsync(Guid itemId) => GetOrCreateAsync(itemId, isPriority: false);
+
+    /// <summary>
+    /// Same as <see cref="GetOrCreateAsync(Guid)"/> but lets the caller mark
+    /// this request as playback-priority so it leapfrogs background work in
+    /// the encoder slot queue. If a Lazy is already in flight for this item,
+    /// the priority is also pushed through <see cref="PromoteToPriority"/> so
+    /// an item already queued at Normal jumps to High in place.
+    /// </summary>
+    public Task<IframeAsset> GetOrCreateAsync(Guid itemId, bool isPriority)
     {
         var key = itemId.ToString("N");
         var lazy = _inflight.GetOrAdd(key, _ => new Lazy<Task<IframeAsset>>(
-            () => GenerateAsync(itemId, _lifetime.ApplicationStopping),
+            () => GenerateAsync(itemId, isPriority, _lifetime.ApplicationStopping),
             LazyThreadSafetyMode.ExecutionAndPublication));
+        if (isPriority) PromoteToPriority(itemId);
         var task = lazy.Value;
         if (task.IsCompleted) _inflight.TryRemove(key, out _);
         return task;
@@ -302,8 +437,9 @@ public sealed class IframeAssetCache
         catch (UnauthorizedAccessException) { return false; }
     }
 
-    private async Task<IframeAsset> GenerateAsync(Guid itemId, CancellationToken ct)
+    private async Task<IframeAsset> GenerateAsync(Guid itemId, bool isPriority, CancellationToken ct)
     {
+        var priority = isPriority ? PriorityHigh : PriorityNormal;
         if (_libraryManager.GetItemById(itemId) is not BaseItem item || string.IsNullOrEmpty(item.Path))
         {
             throw new InvalidOperationException($"Item {itemId} not found or has no path.");
@@ -352,13 +488,13 @@ public sealed class IframeAssetCache
         _inflightProgress[key] = progress;
 
         var slotWaitSw = Stopwatch.StartNew();
-        await _globalLimit.WaitAsync(ct).ConfigureAwait(false);
+        await AcquireSlotAsync(priority, itemId, ct).ConfigureAwait(false);
         slotWaitSw.Stop();
         if (slotWaitSw.ElapsedMilliseconds > 100)
         {
             _logger.LogInformation(
-                "[NativeTrickplay] generation queued behind {WaitMs}ms wait for {ItemId}",
-                slotWaitSw.ElapsedMilliseconds, itemId);
+                "[NativeTrickplay] generation queued behind {WaitMs}ms wait for {ItemId} (priority={Priority})",
+                slotWaitSw.ElapsedMilliseconds, itemId, priority);
         }
         try
         {
@@ -422,7 +558,7 @@ public sealed class IframeAssetCache
         finally
         {
             _inflightProgress.TryRemove(key, out _);
-            _globalLimit.Release();
+            ReleaseSlot();
         }
     }
 

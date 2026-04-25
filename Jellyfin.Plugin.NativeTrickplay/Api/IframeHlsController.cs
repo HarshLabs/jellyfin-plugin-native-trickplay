@@ -57,8 +57,10 @@ public sealed class IframeHlsController : ControllerBase
         // Not yet cached. Kick off generation in the background and tell the client
         // to retry. Using 503 + Retry-After (per HTTP spec) lets AVPlayer politely
         // come back later instead of giving up on the I-frame variant for the
-        // entire playback session.
-        _cache.Warmup(itemId);
+        // entire playback session. Mark High priority — by the time we're
+        // serving an iframe.m3u8 request the user is mid-playback and would
+        // otherwise sit behind any pre-gen / bulk-encode queue.
+        _cache.Warmup(itemId, isPriority: true);
         _logger.LogInformation(
             "[NativeTrickplay] iframe.m3u8 requested for {ItemId} but not cached — 503 + Retry-After issued",
             itemId);
