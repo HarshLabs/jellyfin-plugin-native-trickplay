@@ -13,6 +13,11 @@
        All rules scoped to #NativeTrickplayConfigPage so we never
        leak into the rest of the dashboard. */
     #NativeTrickplayConfigPage .ntp-wrap { max-width: 1100px; margin: 0 auto; padding: 1.5em 1em 4em; }
+    /* Form is just a logical grouping for our submit handler; it must
+       not affect layout. Without this, browser defaults (margin 0, but
+       some Jellyfin themes add padding) made cards inside the form
+       render narrower than cards outside it. */
+    #NativeTrickplayConfigPage #NativeTrickplayConfigForm { margin: 0; padding: 0; width: 100%; display: block; }
 
     #NativeTrickplayConfigPage .ntp-hero {
         padding: 1em 0 1.5em; border-bottom: 1px solid rgba(127,127,127,0.18);
@@ -115,24 +120,89 @@
         font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
 
-    #NativeTrickplayConfigPage .ntp-mini-btn {
-        background: rgba(127,127,127,0.12);
-        border: 1px solid rgba(127,127,127,0.2);
+    /* ── Button system: primary / secondary / tertiary / danger ─────
+       Replaces emby-button on our custom controls so we can enforce a
+       consistent hierarchy without fighting Jellyfin's component CSS.
+       Primary = the one main action per card (Save, Search, Generate);
+       Secondary = supporting actions (Refresh, per-row Regenerate);
+       Tertiary = link-styled, low emphasis;
+       Danger = destructive (Evict). */
+    #NativeTrickplayConfigPage .ntp-btn {
+        display: inline-flex; align-items: center; justify-content: center;
+        gap: 0.45em;
+        padding: 0.65em 1.2em;
+        min-height: 38px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        font: inherit;
+        font-size: 0.92em;
+        font-weight: 500;
+        line-height: 1;
+        cursor: pointer;
+        color: inherit;
+        text-decoration: none;
+        white-space: nowrap;
+        user-select: none;
+        transition: background-color 120ms ease, border-color 120ms ease, transform 60ms ease, box-shadow 120ms ease;
+    }
+    #NativeTrickplayConfigPage .ntp-btn:focus-visible { outline: 2px solid rgba(10, 132, 255, 0.65); outline-offset: 2px; }
+    #NativeTrickplayConfigPage .ntp-btn:active { transform: translateY(1px); }
+    #NativeTrickplayConfigPage .ntp-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    #NativeTrickplayConfigPage .ntp-btn-primary {
+        background: linear-gradient(180deg, #0a84ff 0%, #0064d6 100%);
+        color: #ffffff;
+        border-color: rgba(0,0,0,0.18);
+        box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.18),
+            0 1px 3px rgba(0,40,90,0.30);
+    }
+    #NativeTrickplayConfigPage .ntp-btn-primary:hover {
+        background: linear-gradient(180deg, #1a8fff 0%, #0070e0 100%);
+    }
+
+    #NativeTrickplayConfigPage .ntp-btn-secondary {
+        background: rgba(127,127,127,0.14);
+        border-color: rgba(127,127,127,0.25);
+    }
+    #NativeTrickplayConfigPage .ntp-btn-secondary:hover {
+        background: rgba(127,127,127,0.22);
+        border-color: rgba(127,127,127,0.4);
+    }
+
+    #NativeTrickplayConfigPage .ntp-btn-tertiary {
+        background: transparent;
+        color: rgb(80, 165, 255);
+        padding-left: 0.7em; padding-right: 0.7em;
+    }
+    #NativeTrickplayConfigPage .ntp-btn-tertiary:hover { background: rgba(10, 132, 255, 0.12); }
+
+    #NativeTrickplayConfigPage .ntp-btn-danger {
+        background: rgba(255, 59, 48, 0.14);
+        color: rgb(255, 110, 100);
+        border-color: rgba(255, 59, 48, 0.30);
+    }
+    #NativeTrickplayConfigPage .ntp-btn-danger:hover {
+        background: rgba(255, 59, 48, 0.24);
+        border-color: rgba(255, 59, 48, 0.50);
+    }
+
+    #NativeTrickplayConfigPage .ntp-btn-sm {
+        padding: 0.42em 0.85em;
+        min-height: 30px;
+        font-size: 0.84em;
         border-radius: 6px;
-        padding: 0.4em 0.85em;
-        font-size: 0.82em;
-        cursor: pointer; color: inherit;
-        font-family: inherit;
     }
-    #NativeTrickplayConfigPage .ntp-mini-btn:hover { background: rgba(127,127,127,0.22); }
-    #NativeTrickplayConfigPage .ntp-mini-btn-danger {
-        background: rgba(255, 69, 58, 0.16);
-        border-color: rgba(255, 69, 58, 0.32);
-        color: rgb(255, 120, 110);
-    }
-    #NativeTrickplayConfigPage .ntp-mini-btn-danger:hover { background: rgba(255, 69, 58, 0.28); }
 
     #NativeTrickplayConfigPage .ntp-actions-cell { white-space: nowrap; display: flex; gap: 0.4em; }
+    /* Save settings footer area for the form card */
+    #NativeTrickplayConfigPage .ntp-form-footer {
+        display: flex; justify-content: flex-end; align-items: center;
+        gap: 0.6em;
+        padding-top: 1em; margin-top: 0.5em;
+        border-top: 1px solid rgba(127,127,127,0.18);
+    }
+    #NativeTrickplayConfigPage .ntp-form-footer-help { opacity: 0.55; font-size: 0.85em; margin-right: auto; }
 </style>
     <div data-role="content">
         <div class="content-primary">
@@ -232,10 +302,9 @@
                         </div>
                     </div>
 
-                    <div style="display:flex; justify-content:flex-end; margin-bottom:2em;">
-                        <button is="emby-button" type="submit" class="raised button-submit">
-                            <span>Save settings</span>
-                        </button>
+                    <div class="ntp-form-footer">
+                        <span class="ntp-form-footer-help">Changes take effect immediately for new playbacks.</span>
+                        <button type="submit" class="ntp-btn ntp-btn-primary">Save settings</button>
                     </div>
                 </form>
 
@@ -244,7 +313,7 @@
                         <h2 class="ntp-card-title">Cache Status</h2>
                         <span class="ntp-card-subtitle" id="ntpStatusMeta">Loading…</span>
                         <span class="ntp-spacer" style="flex:1;"></span>
-                        <button class="ntp-mini-btn" id="ntpRefreshStatusBtn" type="button">Refresh</button>
+                        <button class="ntp-btn ntp-btn-secondary ntp-btn-sm" id="ntpRefreshStatusBtn" type="button">Refresh</button>
                     </div>
                     <div class="ntp-stat-grid" id="ntpStatTotals" style="margin-bottom:1.5em;"></div>
                     <div id="ntpLibCoverage" class="ntp-libcoverage"></div>
@@ -265,9 +334,7 @@
                     </div>
                     <div class="ntp-row">
                         <select id="ntpLibrarySelect" is="emby-select" style="min-width:240px;"></select>
-                        <button is="emby-button" id="ntpGenerateLibraryBtn" type="button" class="raised">
-                            <span>Generate all in library</span>
-                        </button>
+                        <button id="ntpGenerateLibraryBtn" type="button" class="ntp-btn ntp-btn-primary">Generate all in library</button>
                     </div>
                 </div>
 
@@ -297,9 +364,7 @@
                             <option value="uncached">Uncached items first</option>
                             <option value="runtime">Runtime (longest first)</option>
                         </select>
-                        <button is="emby-button" id="ntpSearchBtn" type="button" class="raised">
-                            <span>Search</span>
-                        </button>
+                        <button id="ntpSearchBtn" type="button" class="ntp-btn ntp-btn-primary">Search</button>
                     </div>
                     <p class="ntp-search-help">
                         Tokens are AND-matched; matching is case + accent insensitive. Recognized season/episode forms:
@@ -314,10 +379,8 @@
                         </label>
                         <span id="ntpResultsMeta" class="ntp-results-meta"></span>
                         <span class="ntp-spacer" style="flex:1;"></span>
-                        <button is="emby-button" id="ntpGenerateSelectedBtn" type="button" class="raised">
-                            <span>Generate selected</span>
-                        </button>
-                        <button class="ntp-mini-btn ntp-mini-btn-danger" id="ntpEvictSelectedBtn" type="button">Evict selected</button>
+                        <button id="ntpGenerateSelectedBtn" type="button" class="ntp-btn ntp-btn-primary ntp-btn-sm">Generate selected</button>
+                        <button id="ntpEvictSelectedBtn" type="button" class="ntp-btn ntp-btn-danger ntp-btn-sm">Evict selected</button>
                     </div>
                     <div id="ntpResults" class="ntp-results"></div>
                 </div>
@@ -505,8 +568,8 @@
                         '<td>' + title + '</td>' +
                         '<td>' + status + '</td>' +
                         '<td class="ntp-actions-cell">' +
-                            '<button class="ntp-mini-btn ntpRowGenerate" data-id="' + it.Id + '" type="button">' + (it.Cached ? 'Regenerate' : 'Generate') + '</button>' +
-                            (it.Cached ? '<button class="ntp-mini-btn ntp-mini-btn-danger ntpRowEvict" data-id="' + it.Id + '" type="button">Evict</button>' : '') +
+                            '<button class="ntp-btn ntp-btn-secondary ntp-btn-sm ntpRowGenerate" data-id="' + it.Id + '" type="button">' + (it.Cached ? 'Regenerate' : 'Generate') + '</button>' +
+                            (it.Cached ? '<button class="ntp-btn ntp-btn-danger ntp-btn-sm ntpRowEvict" data-id="' + it.Id + '" type="button">Evict</button>' : '') +
                         '</td></tr>';
                 }).join('') + '</tbody></table>';
             document.querySelector('#ntpResults').innerHTML = html;
