@@ -4,13 +4,13 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.NativeTrickplay.Hls;
@@ -25,6 +25,7 @@ public sealed class IframeAssetCache
     private readonly IApplicationPaths _paths;
     private readonly ILibraryManager _libraryManager;
     private readonly IMediaEncoder _encoder;
+    private readonly IHostApplicationLifetime _lifetime;
     private readonly ConcurrentDictionary<string, Lazy<Task<IframeAsset>>> _inflight = new();
     private readonly SemaphoreSlim _globalLimit;
 
@@ -32,31 +33,86 @@ public sealed class IframeAssetCache
         ILogger<IframeAssetCache> logger,
         IApplicationPaths paths,
         ILibraryManager libraryManager,
-        IMediaEncoder encoder)
+        IMediaEncoder encoder,
+        IHostApplicationLifetime lifetime)
     {
         _logger = logger;
         _paths = paths;
         _libraryManager = libraryManager;
         _encoder = encoder;
+        _lifetime = lifetime;
         var max = Plugin.Instance?.Configuration.MaxConcurrentGenerations ?? 1;
         _globalLimit = new SemaphoreSlim(Math.Max(1, max));
     }
 
-    public Task<IframeAsset> GetOrCreateAsync(Guid itemId, CancellationToken ct)
+    /// <summary>
+    /// Synchronous, no-side-effect check: is the asset already on disk and fresh
+    /// (mtime matches)? Returns the asset or null. Used by the controller hot path
+    /// so that fully-cached items respond in &lt; 1 ms with no generation work.
+    /// </summary>
+    public IframeAsset? TryGetCached(Guid itemId)
+    {
+        if (_libraryManager.GetItemById(itemId) is not BaseItem item || string.IsNullOrEmpty(item.Path))
+            return null;
+
+        var dir = Path.Combine(_paths.CachePath, "native-trickplay", itemId.ToString("N"));
+        var playlistPath = Path.Combine(dir, "iframe.m3u8");
+        var segmentPath = Path.Combine(dir, "iframe.m4s");
+        var stampPath = Path.Combine(dir, ".source-mtime");
+
+        if (!File.Exists(playlistPath) || !File.Exists(segmentPath) || !File.Exists(stampPath))
+            return null;
+
+        try
+        {
+            var sourceMtime = File.GetLastWriteTimeUtc(item.Path);
+            if (!long.TryParse(File.ReadAllText(stampPath), NumberStyles.Integer, CultureInfo.InvariantCulture, out var stamped)
+                || stamped != sourceMtime.Ticks)
+                return null;
+            var template = File.ReadAllText(playlistPath);
+            return new IframeAsset(template, segmentPath);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Fire-and-forget warmup. Idempotent under concurrency thanks to the
+    /// in-flight Lazy dictionary. Safe to call from event handlers
+    /// (PlaybackStart, etc) where we do not want to block.
+    /// </summary>
+    public void Warmup(Guid itemId)
+    {
+        _ = GetOrCreateAsync(itemId).ContinueWith(t =>
+        {
+            if (t.IsFaulted)
+            {
+                _logger.LogWarning(t.Exception?.GetBaseException(),
+                    "[NativeTrickplay] warmup failed for {ItemId}", itemId);
+            }
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Returns the in-flight or completed task that produces the asset. Internally
+    /// uses the application lifetime cancellation token, NOT a per-request token —
+    /// this is critical: if we tied generation to the HTTP request, AVPlayer's
+    /// timeout on the slow first manifest fetch would kill ffmpeg, leaving the
+    /// asset perpetually broken.
+    /// </summary>
+    public Task<IframeAsset> GetOrCreateAsync(Guid itemId)
     {
         var key = itemId.ToString("N");
         var lazy = _inflight.GetOrAdd(key, _ => new Lazy<Task<IframeAsset>>(
-            () => GenerateAsync(itemId, ct), LazyThreadSafetyMode.ExecutionAndPublication));
+            () => GenerateAsync(itemId, _lifetime.ApplicationStopping),
+            LazyThreadSafetyMode.ExecutionAndPublication));
         var task = lazy.Value;
         if (task.IsCompleted) _inflight.TryRemove(key, out _);
         return task;
     }
 
-    /// <summary>
-    /// Enumerates on-disk cache entries. Skips directories whose names aren't valid
-    /// item GUIDs, and folds size + max access time across all files in each entry.
-    /// Streams (no full materialization) so the pruner can iterate large caches safely.
-    /// </summary>
     public IEnumerable<CacheEntry> EnumerateCache()
     {
         var root = Path.Combine(_paths.CachePath, "native-trickplay");
@@ -87,11 +143,6 @@ public sealed class IframeAssetCache
         }
     }
 
-    /// <summary>
-    /// Attempts to delete a cache entry. Returns false if the item is currently being
-    /// generated (skip — try again next pass) or if deletion fails. Safe to call
-    /// concurrently with GetOrCreateAsync — the in-flight dictionary acts as the gate.
-    /// </summary>
     public bool TryEvict(Guid itemId)
     {
         var key = itemId.ToString("N");
@@ -126,8 +177,10 @@ public sealed class IframeAssetCache
         var segmentPath = Path.Combine(dir, "iframe.m4s");
         var stampPath = Path.Combine(dir, ".source-mtime");
 
+        // Fast path: already cached and fresh.
         if (File.Exists(playlistPath) && File.Exists(segmentPath) && File.Exists(stampPath)
-            && long.TryParse(await File.ReadAllTextAsync(stampPath, ct).ConfigureAwait(false), out var stamped)
+            && long.TryParse(await File.ReadAllTextAsync(stampPath, ct).ConfigureAwait(false),
+                             NumberStyles.Integer, CultureInfo.InvariantCulture, out var stamped)
             && stamped == sourceMtime.Ticks)
         {
             return new IframeAsset(await File.ReadAllTextAsync(playlistPath, ct).ConfigureAwait(false), segmentPath);
@@ -220,7 +273,7 @@ public sealed class IframeAssetCache
             }
             else if (i > 0 && durations[i - 1] > 0)
             {
-                durations[i] = durations[i - 1]; // last frame: reuse prior duration
+                durations[i] = durations[i - 1];
             }
             else
             {
@@ -275,7 +328,7 @@ public sealed class IframeAssetCache
         var maxDur = 0.0;
         for (int i = 0; i < durations.Count; i++) if (durations[i] > maxDur) maxDur = durations[i];
 
-        var sb = new StringBuilder(fragments.Count * 80);
+        var sb = new System.Text.StringBuilder(fragments.Count * 80);
         sb.AppendLine("#EXTM3U");
         sb.AppendLine("#EXT-X-VERSION:7");
         sb.Append("#EXT-X-TARGETDURATION:").AppendLine(((int)Math.Ceiling(Math.Max(1, maxDur))).ToString(ci));

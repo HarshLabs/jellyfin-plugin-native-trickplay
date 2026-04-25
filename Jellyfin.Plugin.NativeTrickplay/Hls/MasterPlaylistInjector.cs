@@ -4,6 +4,11 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.WebUtilities;
@@ -15,8 +20,12 @@ namespace Jellyfin.Plugin.NativeTrickplay.Hls;
 /// Buffers responses from /Videos/{id}/master.m3u8 and /Videos/{id}/main.m3u8.
 /// - master playlist: appends an EXT-X-I-FRAME-STREAM-INF line.
 /// - main (media) playlist: replaces the body with a synthetic master that
-///   references the original media playlist (with skipIframeInjection=1 to avoid
-///   recursion) plus our I-frame variant.
+///   references the original media playlist (with skipIframeInjection=1 to
+///   avoid recursion) plus our I-frame variant. CRITICAL: the synthetic
+///   STREAM-INF must include accurate CODECS, RESOLUTION, FRAME-RATE, and
+///   VIDEO-RANGE derived from the actual MediaStream — otherwise AVPlayer
+///   refuses to play HDR content because the declared codec capability
+///   doesn't match the real bitstream.
 /// </summary>
 public sealed class MasterPlaylistInjector : IAsyncResultFilter
 {
@@ -25,10 +34,12 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
     private const string IframeVariantCodec = "avc1.4D401E";
     private const long IframeBandwidth = 200_000;
 
+    private readonly ILibraryManager _libraryManager;
     private readonly ILogger<MasterPlaylistInjector> _logger;
 
-    public MasterPlaylistInjector(ILogger<MasterPlaylistInjector> logger)
+    public MasterPlaylistInjector(ILibraryManager libraryManager, ILogger<MasterPlaylistInjector> logger)
     {
+        _libraryManager = libraryManager;
         _logger = logger;
     }
 
@@ -63,7 +74,6 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         {
             await next().ConfigureAwait(false);
 
-            // Restore body before any further writes
             http.Response.Body = origBody;
 
             buffer.Position = 0;
@@ -99,7 +109,14 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             }
             else if (isMediaContent && isMain)
             {
-                transformed = WrapAsMaster(itemId, http.Request);
+                if (!TryWrapAsMaster(itemId, http.Request, out transformed))
+                {
+                    // Couldn't determine the right STREAM-INF safely; pass through unchanged
+                    // so we never break playback (especially HDR).
+                    buffer.Position = 0;
+                    await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
+                    return;
+                }
             }
             else
             {
@@ -149,95 +166,154 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         return sb.ToString();
     }
 
-    private static string WrapAsMaster(Guid itemId, HttpRequest req)
+    /// <summary>
+    /// Attempts to construct a synthetic multivariant playlist that wraps a media
+    /// playlist + our I-frame variant. Returns false if we cannot derive accurate
+    /// STREAM-INF attributes from the item's MediaStream metadata — in which case
+    /// the caller passes the original media playlist through unchanged. This is the
+    /// HDR-safety guarantee: we never emit an inaccurate STREAM-INF for HDR content
+    /// (which would cause AVPlayer to refuse playback due to codec mismatch).
+    /// </summary>
+    private bool TryWrapAsMaster(Guid itemId, HttpRequest req, out string output)
     {
-        var query = req.Query;
-        long bandwidth = TryParseFirstLong(query["VideoBitrate"], 8_000_000);
-        string videoCodec = MapVideoCodec(query["VideoCodec"], query);
-        string audioCodec = MapAudioCodec(query["AudioCodec"]);
+        output = string.Empty;
+
+        var item = _libraryManager.GetItemById(itemId);
+        if (item is null) return false;
+
+        var msId = req.Query["MediaSourceId"].FirstOrDefault();
+        var sources = item.GetMediaSources(false);
+        var ms = (string.IsNullOrEmpty(msId)
+                ? sources?.FirstOrDefault()
+                : sources?.FirstOrDefault(s => string.Equals(s.Id, msId, StringComparison.OrdinalIgnoreCase)))
+            ?? sources?.FirstOrDefault();
+
+        var streams = ms?.MediaStreams;
+        var video = streams?.FirstOrDefault(s => s.Type == MediaStreamType.Video);
+        var audio = streams?.FirstOrDefault(s => s.Type == MediaStreamType.Audio);
+
+        if (video is null) return false; // can't safely synthesize without video stream metadata
+
+        var ci = CultureInfo.InvariantCulture;
 
         var origQs = req.QueryString.Value ?? string.Empty;
-        var innerQs = QueryHelpers.AddQueryString(string.Empty + origQs, SkipMarker, "1");
-        // QueryHelpers.AddQueryString returns a string starting with "?" if path was empty.
-        if (innerQs.StartsWith('?')) innerQs = innerQs[..]; // already has '?'
-        else innerQs = "?" + innerQs.TrimStart('&');
+        var innerQs = AppendQueryParam(origQs, SkipMarker, "1");
 
-        var sb = new StringBuilder(512);
+        long bandwidth = ms?.Bitrate ?? video.BitRate ?? 8_000_000;
+        string videoCodec = BuildVideoCodecString(video);
+        string audioCodec = BuildAudioCodecString(audio);
+        string? videoRange = MapVideoRange(video.VideoRangeType);
+        int? width = video.Width;
+        int? height = video.Height;
+        double? fps = video.RealFrameRate ?? video.AverageFrameRate;
+        int? channels = audio?.Channels;
+
+        var sb = new StringBuilder(640);
         sb.AppendLine("#EXTM3U");
         sb.AppendLine("#EXT-X-VERSION:6");
-        sb.Append(CultureInfo.InvariantCulture,
-            $"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CODECS=\"{videoCodec},{audioCodec}\"")
-          .AppendLine();
+
+        if (audio is not null)
+        {
+            sb.Append(ci, $"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio\",DEFAULT=YES,CHANNELS=\"{channels ?? 2}\"")
+              .AppendLine();
+        }
+
+        sb.Append("#EXT-X-STREAM-INF:");
+        sb.Append(ci, $"BANDWIDTH={bandwidth}");
+        sb.Append(ci, $",AVERAGE-BANDWIDTH={bandwidth}");
+        if (!string.IsNullOrEmpty(videoRange))
+        {
+            sb.Append(ci, $",VIDEO-RANGE={videoRange}");
+        }
+        sb.Append(ci, $",CODECS=\"{videoCodec},{audioCodec}\"");
+        if (width is > 0 && height is > 0)
+        {
+            sb.Append(ci, $",RESOLUTION={width}x{height}");
+        }
+        if (fps is > 0)
+        {
+            sb.Append(ci, $",FRAME-RATE={fps.Value:F3}");
+        }
+        if (audio is not null) sb.Append(",AUDIO=\"audio\"");
+        sb.AppendLine();
         sb.Append("main.m3u8").Append(innerQs).AppendLine();
-        sb.Append(CultureInfo.InvariantCulture,
+
+        sb.Append(ci,
             $"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH={IframeBandwidth},CODECS=\"{IframeVariantCodec}\",URI=\"/Videos/{itemId:N}/iframe.m3u8{origQs}\"")
           .AppendLine();
-        return sb.ToString();
+
+        output = sb.ToString();
+        return true;
     }
 
-    private static long TryParseFirstLong(Microsoft.Extensions.Primitives.StringValues v, long fallback)
+    private static string AppendQueryParam(string queryString, string key, string value)
     {
-        var s = v.FirstOrDefault();
-        return long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : fallback;
+        if (string.IsNullOrEmpty(queryString)) return "?" + key + "=" + Uri.EscapeDataString(value);
+        var sep = queryString.EndsWith('&') || queryString == "?" ? string.Empty : "&";
+        return queryString + sep + key + "=" + Uri.EscapeDataString(value);
     }
 
-    private static string MapVideoCodec(Microsoft.Extensions.Primitives.StringValues v, IQueryCollection query)
+    private static string BuildVideoCodecString(MediaStream video)
     {
-        // Jellyfin's URL carries codec-specific hints — `h264-level`, `h264-profile`, `hevc-level`,
-        // `av1-*` — only when that codec is the actual transcode/copy target. Treat presence of
-        // these hints as authoritative; the VideoCodec list is just preference order.
-        string? actual = null;
-        foreach (var c in (v.FirstOrDefault() ?? string.Empty).Split(','))
+        var ci = CultureInfo.InvariantCulture;
+        var codec = (video.Codec ?? string.Empty).ToLowerInvariant();
+        var bitDepth = video.BitDepth ?? 8;
+        var profile = (video.Profile ?? string.Empty).ToLowerInvariant();
+        var level = (int)Math.Round(video.Level ?? 0.0);
+
+        if (codec is "hevc" or "h265")
         {
-            var name = c.Trim().ToLowerInvariant();
-            if (string.IsNullOrEmpty(name)) continue;
-            if (query.ContainsKey(name + "-level"))
-            {
-                actual = name;
-                break;
-            }
+            // hvc1.<profile_idc>.<profile_compat_flags>.L<level>.<constraint_flags>
+            // Main 8-bit  → profile_idc=1, compat=6
+            // Main10 10-bit → profile_idc=2, compat=4
+            int profileIdc = bitDepth >= 10 ? 2 : 1;
+            int compat = profileIdc == 2 ? 4 : 6;
+            int lvl = level > 0 ? level : 120;   // 4.0 fallback
+            return string.Create(ci, $"hvc1.{profileIdc}.{compat:X}.L{lvl}.B0");
         }
-        actual ??= (v.FirstOrDefault() ?? string.Empty).Split(',').FirstOrDefault()?.Trim().ToLowerInvariant();
-
-        return actual switch
+        if (codec is "av1")
         {
-            "hevc" or "h265" => "hvc1.1.6.L153.B0",
-            "av1" => "av01.0.05M.10",
-            _ => BuildAvc1String(query)
-        };
-    }
+            return bitDepth >= 10 ? "av01.0.05M.10" : "av01.0.05M.08";
+        }
 
-    private static string BuildAvc1String(IQueryCollection query)
-    {
-        // avc1.PPCCLL — profile_idc | profile_compat | level_idc, all hex.
-        int level = TryParseInt(query["h264-level"].FirstOrDefault(), 40);
-        var profile = (query["h264-profile"].FirstOrDefault() ?? "high").ToLowerInvariant();
-        int profileIdc = profile switch
+        // h264 / avc / fallback. avc1.PPCCLL hex.
+        int profileIdc264 = profile switch
         {
-            "baseline" => 0x42,
+            "baseline" or "constrained baseline" => 0x42,
             "main" => 0x4D,
             "high10" => 0x6E,
-            "high422" => 0x7A,
+            "high422" or "high 4:2:2" => 0x7A,
             _ => 0x64 // high
         };
-        int compat = profile == "baseline" ? 0xE0 : 0x00;
-        return string.Create(CultureInfo.InvariantCulture, $"avc1.{profileIdc:X2}{compat:X2}{level:X2}");
+        int compat264 = profileIdc264 == 0x42 ? 0xE0 : 0x00;
+        int level264 = level > 0 ? level : 40; // 4.0
+        return string.Create(ci, $"avc1.{profileIdc264:X2}{compat264:X2}{level264:X2}");
     }
 
-    private static int TryParseInt(string? s, int fallback) =>
-        int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : fallback;
-
-    private static string MapAudioCodec(Microsoft.Extensions.Primitives.StringValues v)
+    private static string BuildAudioCodecString(MediaStream? audio)
     {
-        var first = (v.FirstOrDefault() ?? string.Empty).Split(',').FirstOrDefault()?.Trim().ToLowerInvariant();
-        return first switch
+        if (audio is null) return "mp4a.40.2";
+        var codec = (audio.Codec ?? string.Empty).ToLowerInvariant();
+        return codec switch
         {
             "eac3" => "ec-3",
             "ac3" => "ac-3",
             "flac" => "fLaC",
             "alac" => "alac",
             "opus" => "opus",
+            "truehd" or "mlpa" => "mlpa",
+            "dts" => "dts",
             _ => "mp4a.40.2"
         };
     }
+
+    private static string? MapVideoRange(VideoRangeType type) => type switch
+    {
+        VideoRangeType.SDR => "SDR",
+        VideoRangeType.HLG or VideoRangeType.DOVIWithHLG => "HLG",
+        VideoRangeType.HDR10 or VideoRangeType.HDR10Plus
+            or VideoRangeType.DOVIWithHDR10 or VideoRangeType.DOVIWithSDR
+            or VideoRangeType.DOVIWithEL => "PQ",
+        _ => null
+    };
 }
