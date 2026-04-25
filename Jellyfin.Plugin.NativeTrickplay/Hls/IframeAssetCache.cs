@@ -23,6 +23,18 @@ public sealed record IframeAsset(string PlaylistTemplate, string SegmentPath);
 
 public sealed record CacheEntry(Guid ItemId, string Directory, long SizeBytes, DateTime LastAccessUtc);
 
+/// <summary>
+/// Snapshot of an in-flight generation, exposed to the dashboard for the
+/// progress UI. Status is one of "queued" (waiting on the global encoder
+/// semaphore) or "running" (ffmpeg actively encoding).
+/// </summary>
+public sealed record InflightState(
+    Guid ItemId,
+    string ItemName,
+    DateTime StartedUtc,
+    string Status,
+    long? PartialBytes);
+
 public sealed class IframeAssetCache
 {
     private readonly ILogger<IframeAssetCache> _logger;
@@ -32,7 +44,21 @@ public sealed class IframeAssetCache
     private readonly IServerConfigurationManager _serverConfig;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ConcurrentDictionary<string, Lazy<Task<IframeAsset>>> _inflight = new();
+    // Parallel tracking dictionary for the admin UI's progress feed. Keyed by
+    // the same string (Guid "N" form) the inflight Lazy uses, so they stay in
+    // sync. Holds runtime state (status + .tmp size) that the admin endpoint
+    // can return without poking into Lazy<Task> internals.
+    private readonly ConcurrentDictionary<string, InflightProgress> _inflightProgress = new();
     private readonly SemaphoreSlim _globalLimit;
+
+    private sealed class InflightProgress
+    {
+        public Guid ItemId { get; init; }
+        public string Name { get; init; } = string.Empty;
+        public DateTime StartedUtc { get; init; } = DateTime.UtcNow;
+        public string Status { get; set; } = "queued";
+        public string? TmpSegmentPath { get; set; }
+    }
 
     public IframeAssetCache(
         ILogger<IframeAssetCache> logger,
@@ -304,6 +330,15 @@ public sealed class IframeAssetCache
             "[NativeTrickplay] generation START for {ItemId} ({Name}): source={SourcePath} ({SourceMb} MiB), encoder={Encoder}, awaiting concurrency slot...",
             itemId, item.Name, sourcePath, sourceSize / (1024 * 1024), encoderTag);
 
+        var key = itemId.ToString("N");
+        var progress = new InflightProgress
+        {
+            ItemId = itemId,
+            Name = item.Name ?? "(unnamed)",
+            Status = "queued",
+        };
+        _inflightProgress[key] = progress;
+
         var slotWaitSw = Stopwatch.StartNew();
         await _globalLimit.WaitAsync(ct).ConfigureAwait(false);
         slotWaitSw.Stop();
@@ -317,6 +352,11 @@ public sealed class IframeAssetCache
         {
             var tmpSegmentPath = segmentPath + ".tmp";
             if (File.Exists(tmpSegmentPath)) File.Delete(tmpSegmentPath);
+
+            // Mark progress as running and expose the .tmp path so the
+            // admin UI can read its size and report % done.
+            progress.Status = "running";
+            progress.TmpSegmentPath = tmpSegmentPath;
 
             var ffmpegSw = Stopwatch.StartNew();
             await RunFfmpegAsync(sourcePath, tmpSegmentPath, variant, ct).ConfigureAwait(false);
@@ -369,7 +409,27 @@ public sealed class IframeAssetCache
         }
         finally
         {
+            _inflightProgress.TryRemove(key, out _);
             _globalLimit.Release();
+        }
+    }
+
+    /// <summary>
+    /// Snapshot of every generation currently queued or running. Used by the
+    /// admin dashboard's progress polling endpoint. Returns at most one entry
+    /// per item; ordering is unspecified.
+    /// </summary>
+    public IEnumerable<InflightState> EnumerateInFlight()
+    {
+        foreach (var p in _inflightProgress.Values)
+        {
+            long? partial = null;
+            if (p.TmpSegmentPath is not null)
+            {
+                try { if (File.Exists(p.TmpSegmentPath)) partial = new FileInfo(p.TmpSegmentPath).Length; }
+                catch (IOException) { /* file briefly inaccessible mid-write — surface as null */ }
+            }
+            yield return new InflightState(p.ItemId, p.Name, p.StartedUtc, p.Status, partial);
         }
     }
 
