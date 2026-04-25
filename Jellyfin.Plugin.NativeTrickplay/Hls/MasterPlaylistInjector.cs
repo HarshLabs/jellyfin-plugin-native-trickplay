@@ -31,15 +31,16 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 {
     private const string SkipMarker = "skipIframeInjection";
     private const string IframeMarker = "#EXT-X-I-FRAME-STREAM-INF";
-    private const string IframeVariantCodec = "avc1.4D401E";
     private const long IframeBandwidth = 200_000;
 
     private readonly ILibraryManager _libraryManager;
+    private readonly IframeAssetCache _cache;
     private readonly ILogger<MasterPlaylistInjector> _logger;
 
-    public MasterPlaylistInjector(ILibraryManager libraryManager, ILogger<MasterPlaylistInjector> logger)
+    public MasterPlaylistInjector(ILibraryManager libraryManager, IframeAssetCache cache, ILogger<MasterPlaylistInjector> logger)
     {
         _libraryManager = libraryManager;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -99,27 +100,27 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 
             if (isMasterContent)
             {
-                if (bodyText.Contains(IframeMarker, StringComparison.Ordinal)
-                    || IsHdrMaster(bodyText))
+                if (bodyText.Contains(IframeMarker, StringComparison.Ordinal))
                 {
-                    // Either Jellyfin already advertises an I-frame variant, or this
-                    // is HDR/DV content. AVPlayer rejects the entire master playlist
-                    // when an SDR-codec I-frame variant is paired with HDR primary
-                    // variants (Apple HLS authoring spec §4.4.4.x — I-frame variant
-                    // must match the primary's VIDEO-RANGE family). Skipping
-                    // injection costs HDR trickplay but preserves playback.
+                    // Already advertises an I-frame variant — pass through.
                     buffer.Position = 0;
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                     return;
                 }
-                transformed = AppendIframeVariant(bodyText, itemId, http.Request.QueryString.Value ?? string.Empty);
+                if (!TryAppendIframeVariant(bodyText, itemId, http.Request.QueryString.Value ?? string.Empty, out transformed))
+                {
+                    // Couldn't determine the iframe variant for this item — pass through.
+                    buffer.Position = 0;
+                    await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
+                    return;
+                }
             }
             else if (isMediaContent && isMain)
             {
                 if (!TryWrapAsMaster(itemId, http.Request, out transformed))
                 {
                     // Couldn't determine the right STREAM-INF safely; pass through unchanged
-                    // so we never break playback (especially HDR).
+                    // so we never break playback.
                     buffer.Position = 0;
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                     return;
@@ -154,20 +155,6 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         }
     }
 
-    /// <summary>
-    /// True if any STREAM-INF in the master declares HDR (PQ/HLG) or carries a
-    /// SUPPLEMENTAL-CODECS attribute (Dolby Vision signaling). When this is the
-    /// case, we don't append an SDR I-frame variant — AVPlayer rejects the whole
-    /// master playlist if the I-frame variant's VIDEO-RANGE doesn't match the
-    /// HDR primary, manifesting as "playback stopped at 0ms".
-    /// </summary>
-    private static bool IsHdrMaster(string master)
-    {
-        return master.Contains("VIDEO-RANGE=PQ", StringComparison.Ordinal)
-            || master.Contains("VIDEO-RANGE=HLG", StringComparison.Ordinal)
-            || master.Contains("SUPPLEMENTAL-CODECS=", StringComparison.Ordinal);
-    }
-
     private static bool TryExtractItemId(string path, out Guid itemId)
     {
         var span = path.AsSpan("/Videos/".Length);
@@ -176,15 +163,32 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         return Guid.TryParse(span[..slash], out itemId);
     }
 
-    private static string AppendIframeVariant(string master, Guid itemId, string queryString)
+    private bool TryAppendIframeVariant(string master, Guid itemId, string queryString, out string output)
     {
-        var line = string.Create(CultureInfo.InvariantCulture,
-            $"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH={IframeBandwidth},CODECS=\"{IframeVariantCodec}\",URI=\"/Videos/{itemId:N}/iframe.m3u8{queryString}\"");
-        var sb = new StringBuilder(master.Length + line.Length + 2);
+        output = string.Empty;
+        var item = _libraryManager.GetItemById(itemId);
+        if (item is null) return false;
+
+        var variant = _cache.IframeFormatFor(item);
+        var iframeLine = BuildIframeStreamInfLine(itemId, queryString, variant);
+
+        var sb = new StringBuilder(master.Length + iframeLine.Length + 2);
         sb.Append(master);
         if (master.Length > 0 && master[^1] != '\n') sb.Append('\n');
-        sb.AppendLine(line);
-        return sb.ToString();
+        sb.AppendLine(iframeLine);
+        output = sb.ToString();
+        return true;
+    }
+
+    private static string BuildIframeStreamInfLine(Guid itemId, string queryString, IframeVariant variant)
+    {
+        // The I-frame variant's VIDEO-RANGE family must match the primary's, or
+        // AVPlayer rejects the master. CodecString + VideoRangeAttribute keep
+        // them aligned with what the cache actually encodes for that source.
+        var codec = IframeFormat.CodecString(variant);
+        var range = IframeFormat.VideoRangeAttribute(variant);
+        return string.Create(CultureInfo.InvariantCulture,
+            $"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH={IframeBandwidth},VIDEO-RANGE={range},CODECS=\"{codec}\",URI=\"/Videos/{itemId:N}/iframe.m3u8{queryString}\"");
     }
 
     /// <summary>
@@ -215,16 +219,8 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 
         if (video is null) return false; // can't safely synthesize without video stream metadata
 
-        // HDR/DV: pass through Jellyfin's media playlist unchanged. We can't
-        // safely emit a synthetic master with an SDR I-frame variant alongside
-        // an HDR primary — AVPlayer rejects the master and playback stops at
-        // 0ms (Kodoku-style failure on DV Profile 8 content).
-        if (video.VideoRangeType is not (VideoRangeType.SDR or VideoRangeType.Unknown))
-        {
-            return false;
-        }
-
         var ci = CultureInfo.InvariantCulture;
+        var iframeVariant = IframeFormat.FromVideoRange(video.VideoRangeType);
 
         var origQs = req.QueryString.Value ?? string.Empty;
         var innerQs = AppendQueryParam(origQs, SkipMarker, "1");
@@ -271,9 +267,7 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         sb.AppendLine();
         sb.Append("main.m3u8").Append(innerQs).AppendLine();
 
-        sb.Append(ci,
-            $"#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH={IframeBandwidth},CODECS=\"{IframeVariantCodec}\",URI=\"/Videos/{itemId:N}/iframe.m3u8{origQs}\"")
-          .AppendLine();
+        sb.AppendLine(BuildIframeStreamInfLine(itemId, origQs, iframeVariant));
 
         output = sb.ToString();
         return true;
