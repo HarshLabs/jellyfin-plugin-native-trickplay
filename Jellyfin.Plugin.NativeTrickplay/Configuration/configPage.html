@@ -12,44 +12,46 @@
        only ingests body content; <style> in <head> is dropped.
        All rules scoped to #NativeTrickplayConfigPage so we never
        leak into the rest of the dashboard. */
-    #NativeTrickplayConfigPage .ntp-wrap { max-width: 1100px; margin: 0 auto; padding: 1.5em 1em 4em; }
-    /* Form is just a logical grouping for our submit handler; it must
-       not affect layout. Without this, browser defaults (margin 0, but
-       some Jellyfin themes add padding) made cards inside the form
-       render narrower than cards outside it. */
+    /* ── Spacing scale ──────────────────────────────────────────────
+       Built around an 8px grid: 4 / 8 / 16 / 24 / 32 / 48.
+       Values are em so they auto-scale with Jellyfin's font-size theme.
+       Use these for ALL paddings/margins so the page has a consistent
+       vertical rhythm instead of ad-hoc values. */
+    #NativeTrickplayConfigPage .ntp-wrap { max-width: 1100px; margin: 0 auto; padding: 2em 1em 4em; }
     #NativeTrickplayConfigPage #NativeTrickplayConfigForm { margin: 0; padding: 0; width: 100%; display: block; }
 
     #NativeTrickplayConfigPage .ntp-hero {
-        padding: 1em 0 1.5em; border-bottom: 1px solid rgba(127,127,127,0.18);
-        margin-bottom: 1.5em;
+        padding: 1em 0 2em;
+        border-bottom: 1px solid rgba(127,127,127,0.18);
+        margin-bottom: 2em;
     }
-    #NativeTrickplayConfigPage .ntp-hero-title { margin: 0; font-size: 1.7em; font-weight: 600; letter-spacing: -0.01em; }
-    #NativeTrickplayConfigPage .ntp-hero-subtitle { margin: 0.4em 0 0; opacity: 0.65; font-size: 0.95em; max-width: 65ch; line-height: 1.45; }
+    #NativeTrickplayConfigPage .ntp-hero-title { margin: 0; font-size: 1.75em; font-weight: 600; letter-spacing: -0.01em; line-height: 1.15; }
+    #NativeTrickplayConfigPage .ntp-hero-subtitle { margin: 0.5em 0 0; opacity: 0.65; font-size: 0.95em; max-width: 65ch; line-height: 1.5; }
 
     #NativeTrickplayConfigPage .ntp-card {
         background: rgba(127,127,127,0.06);
         border: 1px solid rgba(127,127,127,0.18);
         border-radius: 12px;
-        padding: 1.5em;
-        margin-bottom: 1em;
+        padding: 1.75em;
+        margin-bottom: 1.25em;
     }
-    #NativeTrickplayConfigPage .ntp-card-header { margin: 0 0 1em; display: flex; align-items: baseline; gap: 0.7em; flex-wrap: wrap; }
+    #NativeTrickplayConfigPage .ntp-card-header { margin: 0 0 1.25em; display: flex; align-items: baseline; gap: 0.7em; flex-wrap: wrap; }
     #NativeTrickplayConfigPage .ntp-card-title { margin: 0; font-size: 1.15em; font-weight: 600; }
     #NativeTrickplayConfigPage .ntp-card-subtitle { margin: 0; opacity: 0.55; font-size: 0.85em; }
     #NativeTrickplayConfigPage .ntp-spacer { flex: 1 1 auto; }
 
-    #NativeTrickplayConfigPage .ntp-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1em; }
+    #NativeTrickplayConfigPage .ntp-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1.25em; margin-bottom: 1.5em; }
     #NativeTrickplayConfigPage .ntp-stat-value { font-size: 1.6em; font-weight: 600; line-height: 1.1; letter-spacing: -0.01em; }
-    #NativeTrickplayConfigPage .ntp-stat-label { font-size: 0.78em; opacity: 0.55; margin-top: 0.2em; text-transform: uppercase; letter-spacing: 0.05em; }
+    #NativeTrickplayConfigPage .ntp-stat-label { font-size: 0.78em; opacity: 0.55; margin-top: 0.25em; text-transform: uppercase; letter-spacing: 0.05em; }
 
-    #NativeTrickplayConfigPage .ntp-row { display: flex; gap: 0.6em; align-items: center; flex-wrap: wrap; }
+    #NativeTrickplayConfigPage .ntp-row { display: flex; gap: 0.75em; align-items: center; flex-wrap: wrap; }
 
     #NativeTrickplayConfigPage .ntp-form-row {
         display: grid;
         grid-template-columns: minmax(0, 1fr) 220px;
         gap: 1.5em;
         align-items: center;
-        padding: 0.85em 0;
+        padding: 1.1em 0;
         border-bottom: 1px solid rgba(127,127,127,0.12);
     }
     #NativeTrickplayConfigPage .ntp-form-row:last-of-type { border-bottom: none; }
@@ -72,7 +74,7 @@
         grid-template-columns: minmax(120px, 1fr) minmax(80px, 200px) 130px;
         gap: 1em;
         align-items: center;
-        padding: 0.45em 0;
+        padding: 0.55em 0;
     }
     #NativeTrickplayConfigPage .ntp-libcoverage-bar { background: rgba(127,127,127,0.18); height: 6px; border-radius: 3px; overflow: hidden; }
     #NativeTrickplayConfigPage .ntp-libcoverage-bar-fill { height: 100%; background: linear-gradient(90deg, #34c759, #30a3f0); transition: width 0.3s ease; }
@@ -80,7 +82,7 @@
 
     #NativeTrickplayConfigPage .ntp-table { width: 100%; border-collapse: collapse; }
     #NativeTrickplayConfigPage .ntp-table th {
-        text-align: left; padding: 0.7em 0.6em;
+        text-align: left; padding: 0.85em 0.75em;
         font-weight: 600; font-size: 0.8em;
         opacity: 0.6; text-transform: uppercase; letter-spacing: 0.04em;
         border-bottom: 1px solid rgba(127,127,127,0.25);
@@ -88,7 +90,7 @@
         background: var(--theme-body-background-color, #101012);
         z-index: 1;
     }
-    #NativeTrickplayConfigPage .ntp-table td { padding: 0.7em 0.6em; border-bottom: 1px solid rgba(127,127,127,0.10); vertical-align: middle; }
+    #NativeTrickplayConfigPage .ntp-table td { padding: 0.85em 0.75em; border-bottom: 1px solid rgba(127,127,127,0.10); vertical-align: middle; }
     #NativeTrickplayConfigPage .ntp-table tbody tr:hover { background: rgba(127,127,127,0.06); }
     #NativeTrickplayConfigPage .ntp-table tbody tr:last-child td { border-bottom: none; }
 
@@ -129,13 +131,13 @@
        Danger = destructive (Evict). */
     #NativeTrickplayConfigPage .ntp-btn {
         display: inline-flex; align-items: center; justify-content: center;
-        gap: 0.45em;
-        padding: 0.65em 1.2em;
-        min-height: 38px;
+        gap: 0.5em;
+        padding: 0.85em 1.4em;
+        min-height: 44px;     /* Apple-standard touch target */
         border: 1px solid transparent;
         border-radius: 8px;
         font: inherit;
-        font-size: 0.92em;
+        font-size: 0.95em;
         font-weight: 500;
         line-height: 1;
         cursor: pointer;
@@ -188,21 +190,23 @@
     }
 
     #NativeTrickplayConfigPage .ntp-btn-sm {
-        padding: 0.42em 0.85em;
-        min-height: 30px;
-        font-size: 0.84em;
+        padding: 0.5em 1em;
+        min-height: 32px;
+        font-size: 0.85em;
         border-radius: 6px;
     }
 
-    #NativeTrickplayConfigPage .ntp-actions-cell { white-space: nowrap; display: flex; gap: 0.4em; }
-    /* Save settings footer area */
+    #NativeTrickplayConfigPage .ntp-actions-cell { white-space: nowrap; display: flex; gap: 0.5em; }
+    /* Save settings footer area — extra vertical breathing room around
+       the divider so the primary action feels weighted. */
     #NativeTrickplayConfigPage .ntp-form-footer {
         display: flex; justify-content: flex-end; align-items: center;
-        gap: 0.6em;
-        padding-top: 1em; margin-top: 0.5em;
+        gap: 0.75em;
+        padding: 1.5em 0 0.25em;
+        margin-top: 1em;
         border-top: 1px solid rgba(127,127,127,0.18);
     }
-    #NativeTrickplayConfigPage .ntp-form-footer-help { opacity: 0.55; font-size: 0.85em; margin-right: auto; }
+    #NativeTrickplayConfigPage .ntp-form-footer-help { opacity: 0.55; font-size: 0.9em; margin-right: auto; }
 
     /* ── iOS-style toggle replacement for emby-checkbox ──────────────
        The wrapped emby-checkbox doesn't paint reliably here (no visible
@@ -237,10 +241,16 @@
 
     /* ── Mobile responsiveness ──────────────────────────────────────── */
     @media (max-width: 700px) {
-        #NativeTrickplayConfigPage .ntp-wrap { padding: 1em 0.75em 3em; }
-        #NativeTrickplayConfigPage .ntp-card { padding: 1.1em; border-radius: 10px; }
+        #NativeTrickplayConfigPage .ntp-wrap { padding: 1.25em 0.75em 3em; }
+        #NativeTrickplayConfigPage .ntp-card { padding: 1.25em; border-radius: 10px; margin-bottom: 1em; }
+        #NativeTrickplayConfigPage .ntp-hero { padding: 0.5em 0 1.25em; margin-bottom: 1.25em; }
         #NativeTrickplayConfigPage .ntp-hero-title { font-size: 1.4em; }
         #NativeTrickplayConfigPage .ntp-stat-value { font-size: 1.3em; }
+        #NativeTrickplayConfigPage .ntp-form-row { padding: 0.85em 0; }
+        #NativeTrickplayConfigPage .ntp-form-footer { padding: 1.25em 0 0.25em; }
+        #NativeTrickplayConfigPage .ntp-btn { padding: 0.75em 1.2em; min-height: 42px; }
+        #NativeTrickplayConfigPage .ntp-table th,
+        #NativeTrickplayConfigPage .ntp-table td { padding: 0.6em 0.5em; }
 
         #NativeTrickplayConfigPage .ntp-card-header { flex-direction: column; align-items: flex-start; gap: 0.2em; }
         #NativeTrickplayConfigPage .ntp-card-header > .ntp-spacer { display: none; }
