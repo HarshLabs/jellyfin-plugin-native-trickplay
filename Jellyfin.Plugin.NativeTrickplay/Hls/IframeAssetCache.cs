@@ -73,7 +73,12 @@ public sealed class IframeAssetCache
     {
         public Guid ItemId { get; init; }
         public string Name { get; init; } = string.Empty;
-        public DateTime StartedUtc { get; init; } = DateTime.UtcNow;
+        // Restamped when status flips from "queued" to "running" so the UI's
+        // elapsed-time column reflects encode time, not queue-wait time. With
+        // a bulk "Generate library" of thousands of items, the queue-time
+        // value would otherwise show every actively-encoding item as having
+        // been "running" for the entire duration of the bulk job.
+        public DateTime StartedUtc { get; set; } = DateTime.UtcNow;
         public string Status { get; set; } = "queued";
         public string? TmpSegmentPath { get; set; }
         // Rough projected output size; used by the dashboard to render a
@@ -516,7 +521,10 @@ public sealed class IframeAssetCache
             if (File.Exists(tmpSegmentPath)) File.Delete(tmpSegmentPath);
 
             // Mark progress as running and expose the .tmp path so the
-            // admin UI can read its size and report % done.
+            // admin UI can read its size and report % done. Restamp
+            // StartedUtc so the elapsed column tracks encode time rather
+            // than queue-wait time.
+            progress.StartedUtc = DateTime.UtcNow;
             progress.Status = "running";
             progress.TmpSegmentPath = tmpSegmentPath;
 
