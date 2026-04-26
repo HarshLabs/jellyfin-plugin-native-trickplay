@@ -62,7 +62,15 @@ public sealed class IframeAdminController : ControllerBase
     [HttpGet("Status")]
     public ActionResult<StatusResponse> GetStatus()
     {
-        var cachedEntries = _cache.EnumerateCache().ToList();
+        // Only count COMPLETE entries (those with a `.source-mtime` stamp).
+        // Without this filter, the dashboard would show every queued / in-
+        // flight / interrupted encode as "cached" because EnumerateCache
+        // walks all directories under the cache root regardless of status.
+        // After a server restart with thousands of items mid-encode,
+        // StartupResumeService re-creates those directories with no stamp;
+        // counting them would inflate the "cached items" KPI to ~100% when
+        // most of those rows are still queuing up to be re-encoded.
+        var cachedEntries = _cache.EnumerateCache().Where(e => e.IsComplete).ToList();
         long cachedBytes = cachedEntries.Sum(e => e.SizeBytes);
         var cachedIds = new HashSet<Guid>(cachedEntries.Select(e => e.ItemId));
 
@@ -152,8 +160,15 @@ public sealed class IframeAdminController : ControllerBase
         }
 
         // Pre-compute the cache size map once — EnumerateCache walks the
-        // filesystem; calling it per-item is O(N²).
-        var sizeByItem = _cache.EnumerateCache().ToDictionary(e => e.ItemId, e => e.SizeBytes);
+        // filesystem; calling it per-item is O(N²). Only include COMPLETE
+        // entries (with `.source-mtime` stamp) so an item that's mid-encode
+        // doesn't display a misleading partial size in its row alongside an
+        // (incorrect) "cached" indicator. Cached-flag itself uses
+        // TryGetCached which already validates completeness — this aligns
+        // the displayed size with that flag.
+        var sizeByItem = _cache.EnumerateCache()
+            .Where(e => e.IsComplete)
+            .ToDictionary(e => e.ItemId, e => e.SizeBytes);
 
         // Materialize rows with cache status, then apply the requested sort.
         // Sort happens after status enrichment so we can sort by cached flag

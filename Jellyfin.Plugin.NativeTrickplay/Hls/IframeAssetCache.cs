@@ -22,7 +22,7 @@ namespace Jellyfin.Plugin.NativeTrickplay.Hls;
 
 public sealed record IframeAsset(string PlaylistTemplate, string SegmentPath);
 
-public sealed record CacheEntry(Guid ItemId, string Directory, long SizeBytes, DateTime LastAccessUtc);
+public sealed record CacheEntry(Guid ItemId, string Directory, long SizeBytes, DateTime LastAccessUtc, bool IsComplete);
 
 /// <summary>
 /// Snapshot of an in-flight generation, exposed to the dashboard for the
@@ -449,6 +449,16 @@ public sealed class IframeAssetCache
         return task;
     }
 
+    /// <summary>
+    /// Walk the cache root and yield one entry per item-id directory.
+    /// Includes BOTH completed encodes (with `.source-mtime` stamp) and
+    /// incomplete leftovers (queued/in-flight directory + .tmp file, or a
+    /// directory from a prior crashed encode). Completion is exposed via
+    /// <see cref="CacheEntry.IsComplete"/> so callers can filter — the
+    /// dashboard only shows complete entries (so the count matches what's
+    /// actually playable), while the prune task wants the full set so it
+    /// can clean up incomplete leftovers in Phase 0.
+    /// </summary>
     public IEnumerable<CacheEntry> EnumerateCache()
     {
         var root = GetCacheRoot();
@@ -461,6 +471,7 @@ public sealed class IframeAssetCache
 
             long size = 0;
             DateTime lastAccess = DateTime.MinValue;
+            bool stampExists = false;
             try
             {
                 foreach (var file in Directory.EnumerateFiles(dirPath))
@@ -469,13 +480,20 @@ public sealed class IframeAssetCache
                     size += fi.Length;
                     var t = fi.LastAccessTimeUtc;
                     if (t > lastAccess) lastAccess = t;
+                    if (fi.Name == ".source-mtime") stampExists = true;
                 }
             }
             catch (IOException) { continue; }
             catch (UnauthorizedAccessException) { continue; }
 
             if (lastAccess == DateTime.MinValue) lastAccess = DateTime.UtcNow;
-            yield return new CacheEntry(itemId, dirPath, size, lastAccess);
+            // IsComplete reflects "encode finished cleanly enough to write
+            // the stamp" — the stamp is the LAST thing GenerateAsync writes,
+            // so its presence implies playlist + segment also exist. After
+            // a server restart mid-encode, the directory + .tmp file persist
+            // but no stamp — those entries return IsComplete=false and the
+            // dashboard correctly excludes them from "cached" counts.
+            yield return new CacheEntry(itemId, dirPath, size, lastAccess, stampExists);
         }
     }
 
