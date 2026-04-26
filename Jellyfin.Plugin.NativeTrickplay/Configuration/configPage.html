@@ -999,6 +999,35 @@
             return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's';
         }
 
+        // Build the display string for an item in the encoding-in-progress
+        // card. For episodes with series + S/E metadata, returns
+        // "Series · S2E12 — Title" so the row is identifiable at a glance
+        // (raw episode titles are often cryptic and indistinguishable from
+        // each other). Movies and items missing metadata fall back to the
+        // bare ItemName. Returns escaped HTML.
+        function ntpInflightDisplayName(it) {
+            var name = ntpEscape(it.ItemName);
+            if (!it.SeriesName) return name;
+            var prefix = ntpEscape(it.SeriesName);
+            if (it.SeasonNumber != null && it.EpisodeNumber != null) {
+                var s = String(it.SeasonNumber);
+                var e = String(it.EpisodeNumber).padStart(2, '0');
+                prefix += ' · S' + s + 'E' + e;
+            }
+            return prefix + ' — ' + name;
+        }
+
+        // Build the muted metadata line under the item name: source profile
+        // (resolution + codec + bit depth + HDR) and the hardware decode
+        // path actually in use this run. Each piece is omitted when not
+        // available — empty string means render no second line at all.
+        function ntpInflightMetaLine(it) {
+            var pieces = [];
+            if (it.SourceProfile) pieces.push(ntpEscape(it.SourceProfile));
+            if (it.HardwarePath)  pieces.push(ntpEscape(it.HardwarePath));
+            return pieces.join(' · ');
+        }
+
         function ntpBuildBusyCell(state) {
             // state = { Status, PartialBytes, EstimatedTotalBytes, StartedUtc, ServerUtc }
             var pct = ntpComputePercent(state);
@@ -1273,8 +1302,15 @@
                             if (eta) etaCell = eta + (speed ? ' <span style="opacity:0.5;font-size:0.85em;">· ' + speed + '</span>' : '');
                             else if (speed) etaCell = '<span style="opacity:0.7;">' + speed + '</span>';
                         }
+                        // Two-line Item cell: display name on top (with
+                        // series prefix for episodes), source profile + HW
+                        // path muted underneath. The meta line only renders
+                        // when at least one piece is known.
+                        var meta = ntpInflightMetaLine(it);
+                        var itemCell = ntpInflightDisplayName(it) +
+                            (meta ? '<div style="opacity:0.55;font-size:0.85em;margin-top:2px;">' + meta + '</div>' : '');
                         return '<tr>' +
-                            '<td>' + ntpEscape(it.ItemName) + '</td>' +
+                            '<td>' + itemCell + '</td>' +
                             '<td>' + badge + '</td>' +
                             '<td>' + (it.Status === 'running' ? ntpFmtElapsed(it.StartedUtc, p.ServerUtc) : '—') + '</td>' +
                             '<td>' + etaCell + '</td>' +

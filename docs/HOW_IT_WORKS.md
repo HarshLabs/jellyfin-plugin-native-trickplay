@@ -443,10 +443,11 @@ per-library breakdown with progress bars, refresh button.
 **Encoding in progress** (`GET /Plugins/NativeTrickplay/Progress`) —
 polls every 2 s when active, every 15 s when idle. Shows running items
 first (pinned), then queued in submission order. Each running row
-displays five live columns:
+displays six live columns:
 
 | Column | Meaning |
 |---|---|
+| **Item** | Two-line display. Top line: `Series · S2E12 — Episode title` for episodes (raw episode names like "Two Dragon Emperors" are usually unidentifiable on their own), bare title for movies. Muted second line: source profile + decode hardware path (e.g. `2160p HEVC 10-bit HDR · CUDA`). The source profile is single-pass `ffprobe` data captured during the existing HDR/bit-depth probe — codec, resolution, bit depth, HDR flag combined into one tag. The hardware path reflects the *actual* decoder for this run; on the software-decode retry path it flips to `SW` so an admin can see when hwaccel fell back. |
 | **Status** | `▶ running · NN%` (or `⏸ queued`). Percent is the same value as the Progress column, embedded in the badge for at-a-glance scanning. |
 | **Elapsed** | Wall-clock time since this item's slot was acquired and ffmpeg actually started. *Not* time since it was originally queued — restamped at queued→running transition so a row that just got promoted from a multi-thousand-item bulk job displays a fresh elapsed counter, not the age of the bulk job. |
 | **ETA** | Projected wall-clock seconds until the encode finishes, computed from ffmpeg's reported `speed` multiplier: `(source_duration − source_consumed) / speed`. Shown as `2m 15s · 1.83x` — duration plus the current speed multiplier in muted text underneath, so an admin can see *why* it's slow (e.g. `0.4x` = encoder is the bottleneck). Shows just the speed (no ETA) if `speed` is known but the source duration isn't. |

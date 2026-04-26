@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Model.Configuration;
@@ -37,7 +38,12 @@ public sealed record InflightState(
     long? EstimatedTotalBytes,
     long? EncodedSourceMicros,
     long? SourceDurationMicros,
-    double? EncodingSpeed);
+    double? EncodingSpeed,
+    string? SeriesName,
+    int? SeasonNumber,
+    int? EpisodeNumber,
+    string? SourceProfile,
+    string? HardwarePath);
 
 public sealed class IframeAssetCache
 {
@@ -112,6 +118,22 @@ public sealed class IframeAssetCache
         // / 1e6 / EncodingSpeed. Null for items without a known source
         // duration or before the first progress block lands.
         public double? EncodingSpeed { get; set; }
+        // Series + season/episode info for TV episode rows so the UI can
+        // render "Series · S2E12 — Episode title" instead of a bare cryptic
+        // episode name. Null for movies / non-episode items.
+        public string? SeriesName { get; init; }
+        public int? SeasonNumber { get; init; }
+        public int? EpisodeNumber { get; init; }
+        // Pre-formatted source profile for at-a-glance "why is this slow"
+        // context (e.g. "2160p HEVC 10-bit HDR", "1080p H.264"). Populated
+        // from the existing ProbeSourceVideo call once the encode actually
+        // starts running; null while queued or for sources that probe fails on.
+        public string? SourceProfile { get; set; }
+        // Short tag for the decode hwaccel actually in use this run:
+        // "QSV", "VAAPI", "CUDA", "VideoToolbox", "D3D11VA", or "SW".
+        // Reset to "SW" on the software-decode retry path so the dashboard
+        // accurately reflects which path each in-flight encode is taking.
+        public string? HardwarePath { get; set; }
     }
 
     public IframeAssetCache(
@@ -521,6 +543,16 @@ public sealed class IframeAssetCache
             itemId, item.Name, sourcePath, sourceSize / (1024 * 1024), encoderTag);
 
         var key = itemId.ToString("N");
+        // Episode metadata for the dashboard's display name. Movies and
+        // other non-episode items leave these null.
+        string? seriesName = null;
+        int? seasonNumber = null, episodeNumber = null;
+        if (item is Episode ep)
+        {
+            seriesName = ep.SeriesName;
+            seasonNumber = ep.ParentIndexNumber;
+            episodeNumber = ep.IndexNumber;
+        }
         var progress = new InflightProgress
         {
             ItemId = itemId,
@@ -530,6 +562,9 @@ public sealed class IframeAssetCache
             // RunTimeTicks is in 100-nanosecond ticks; divide by 10 to get
             // microseconds, the unit ffmpeg's `-progress pipe:1` emits.
             SourceDurationMicros = item.RunTimeTicks is long ticks and > 0 ? ticks / 10 : null,
+            SeriesName = seriesName,
+            SeasonNumber = seasonNumber,
+            EpisodeNumber = episodeNumber,
         };
         _inflightProgress[key] = progress;
 
@@ -633,7 +668,8 @@ public sealed class IframeAssetCache
             }
             yield return new InflightState(
                 p.ItemId, p.Name, p.StartedUtc, p.Status, partial,
-                p.EstimatedTotalBytes, p.EncodedSourceMicros, p.SourceDurationMicros, p.EncodingSpeed);
+                p.EstimatedTotalBytes, p.EncodedSourceMicros, p.SourceDurationMicros, p.EncodingSpeed,
+                p.SeriesName, p.SeasonNumber, p.EpisodeNumber, p.SourceProfile, p.HardwarePath);
         }
     }
 
@@ -670,11 +706,24 @@ public sealed class IframeAssetCache
     private async Task RunFfmpegAsync(string inputPath, string outputPath, IframeVariant variant, InflightProgress? progress, CancellationToken ct)
     {
         var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
-        var (isHdrSource, is10BitSource) = ProbeSourceVideo(inputPath);
+        var (isHdrSource, is10BitSource, srcCodec, srcHeight) = ProbeSourceVideo(inputPath);
+        if (progress is not null)
+        {
+            progress.SourceProfile = FormatSourceProfile(srcHeight, srcCodec, is10BitSource, isHdrSource);
+        }
 
         // First attempt: with hwaccel if configured.
         var hwaccelArgs = new List<string>();
         AppendHwaccelArgs(cfg, hwaccelArgs);
+        // Surface which decode path is in use this run. AppendHwaccelArgs
+        // emits "-hwaccel <name> ..." pairs starting at index 0; the decoder
+        // tag itself is at index 1. Empty list = software decode.
+        if (progress is not null)
+        {
+            progress.HardwarePath = hwaccelArgs.Count >= 2
+                ? FormatHwPath(hwaccelArgs[1])
+                : "SW";
+        }
 
         var primaryArgs = BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs, isHdrSource, is10BitSource);
         _logger.LogInformation(
@@ -736,10 +785,13 @@ public sealed class IframeAssetCache
         // Reset progress before the software-decode retry so the dashboard
         // doesn't briefly display stale "near 100%" from the failed attempt
         // before the new run starts emitting fresh out_time_us values.
+        // Also flip HardwarePath to "SW" so the dashboard reflects the
+        // actual path the second-attempt encode is taking.
         if (progress is not null)
         {
             progress.EncodedSourceMicros = 0;
             progress.EncodingSpeed = null;
+            progress.HardwarePath = "SW";
         }
 
         await RunProcessAsync(_encoder.EncoderPath,
@@ -759,12 +811,19 @@ public sealed class IframeAssetCache
     /// alternation, then errors hard if the device's valid_sw_formats
     /// list doesn't include it — alternation `nv12|p010le` does NOT
     /// auto-fall-back to p010le on 10-bit source, despite intuition).</item>
+    /// <item>Codec — lowercase ffmpeg codec_name (e.g. "h264", "hevc").
+    /// Used by the dashboard's source-profile column; not consumed by the
+    /// encoder itself.</item>
+    /// <item>Height — integer height in pixels for the dashboard's
+    /// resolution tag ("1080p", "2160p", etc.). Width is omitted because
+    /// resolution-class is conventionally named by height.</item>
     /// </list>
-    /// On any probe failure: treat as SDR + 8-bit. SDR-on-HDR mis-tag just
-    /// produces washed-out thumbnails (acceptable); 8-bit-on-10-bit
-    /// hwdownload is recoverable via the software-decode fallback.
+    /// On any probe failure: treat as SDR + 8-bit, codec/height null.
+    /// SDR-on-HDR mis-tag just produces washed-out thumbnails (acceptable);
+    /// 8-bit-on-10-bit hwdownload is recoverable via the software-decode
+    /// fallback.
     /// </summary>
-    private (bool IsHdr, bool Is10Bit) ProbeSourceVideo(string inputPath)
+    private (bool IsHdr, bool Is10Bit, string? Codec, int? Height) ProbeSourceVideo(string inputPath)
     {
         try
         {
@@ -775,7 +834,7 @@ public sealed class IframeAssetCache
                 {
                     "-v", "error",
                     "-select_streams", "v:0",
-                    "-show_entries", "stream=color_transfer,bits_per_raw_sample,pix_fmt",
+                    "-show_entries", "stream=color_transfer,bits_per_raw_sample,pix_fmt,codec_name,height",
                     "-of", "default=noprint_wrappers=1",
                     inputPath,
                 },
@@ -785,11 +844,11 @@ public sealed class IframeAssetCache
                 CreateNoWindow = true,
             };
             using var proc = System.Diagnostics.Process.Start(psi);
-            if (proc is null) return (false, false);
+            if (proc is null) return (false, false, null, null);
             if (!proc.WaitForExit(3000))
             {
                 proc.Kill(entireProcessTree: true);
-                return (false, false);
+                return (false, false, null, null);
             }
             var output = proc.StandardOutput.ReadToEnd().ToLowerInvariant();
             string Get(string key)
@@ -806,6 +865,8 @@ public sealed class IframeAssetCache
             var transfer = Get("color_transfer");
             var bitsRaw = Get("bits_per_raw_sample");
             var pixFmt = Get("pix_fmt");
+            var codec = Get("codec_name");
+            var heightStr = Get("height");
             var isHdr = transfer is "smpte2084" or "arib-std-b67";
             // bits_per_raw_sample may be N/A for some sources; fall back to
             // pix_fmt heuristic. Common 10-bit pixel formats include
@@ -815,14 +876,63 @@ public sealed class IframeAssetCache
                 pixFmt.Contains("p10", StringComparison.Ordinal) ||
                 pixFmt.Contains("10le", StringComparison.Ordinal) ||
                 pixFmt.Contains("10be", StringComparison.Ordinal);
-            return (isHdr, is10Bit);
+            int? height = int.TryParse(heightStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var h) && h > 0 ? h : null;
+            return (isHdr, is10Bit, string.IsNullOrEmpty(codec) ? null : codec, height);
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "[NativeTrickplay] source probe failed for {Path}, defaulting to SDR/8-bit", inputPath);
-            return (false, false);
+            return (false, false, null, null);
         }
     }
+
+    /// <summary>
+    /// Format probe results into a single human-readable source-profile tag
+    /// for the dashboard ("2160p HEVC 10-bit HDR", "1080p H.264", etc.).
+    /// Bit depth is only labeled when 10-bit (8-bit is the implied default);
+    /// HDR suffix only appears for PQ/HLG sources. Returns null if probe
+    /// produced nothing usable (no codec AND no height).
+    /// </summary>
+    private static string? FormatSourceProfile(int? height, string? codec, bool is10Bit, bool isHdr)
+    {
+        if (height is null && string.IsNullOrEmpty(codec)) return null;
+        var parts = new List<string>(4);
+        if (height is int h) parts.Add(h + "p");
+        if (!string.IsNullOrEmpty(codec))
+        {
+            parts.Add(codec switch
+            {
+                "h264" => "H.264",
+                "hevc" or "h265" => "HEVC",
+                "av1" => "AV1",
+                "vp9" => "VP9",
+                "vp8" => "VP8",
+                "mpeg4" => "MPEG-4",
+                "mpeg2video" => "MPEG-2",
+                _ => codec.ToUpperInvariant(),
+            });
+        }
+        if (is10Bit) parts.Add("10-bit");
+        if (isHdr) parts.Add("HDR");
+        return string.Join(' ', parts);
+    }
+
+    /// <summary>
+    /// Map ffmpeg's `-hwaccel` decoder name (lowercase, e.g. "cuda", "qsv")
+    /// to a short display tag for the dashboard. "cuda" maps to "CUDA"
+    /// because that's the decoder name an admin would recognize from a
+    /// Jellyfin transcoding settings page; we don't surface "NVENC" here
+    /// since this column tracks the *decode* path, not the encoder.
+    /// </summary>
+    private static string FormatHwPath(string raw) => raw switch
+    {
+        "videotoolbox" => "VideoToolbox",
+        "qsv" => "QSV",
+        "vaapi" => "VAAPI",
+        "cuda" => "CUDA",
+        "d3d11va" => "D3D11VA",
+        _ => raw.ToUpperInvariant(),
+    };
 
     private static List<string> BuildFfmpegArgs(
         PluginConfiguration cfg, string inputPath, string outputPath, IframeVariant variant, IReadOnlyList<string>? hwaccelArgs, bool isHdrSource, bool is10BitSource)
