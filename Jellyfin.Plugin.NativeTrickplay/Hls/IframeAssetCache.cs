@@ -760,32 +760,28 @@ public sealed class IframeAssetCache
         // Hardware decode args go BEFORE -i.
         if (hwaccelArgs is { Count: > 0 }) args.AddRange(hwaccelArgs);
 
-        // VideoToolbox auto-transfers decoded frames to CPU memory when no
-        // -hwaccel_output_format is specified, so a CPU filter chain works
-        // out of the box. QSV / VAAPI / CUDA / D3D11VA do NOT auto-transfer:
-        // their decoder leaves frames in GPU memory in a hardware pixel
-        // format. The first CPU-only filter (`fps`) then can't bridge to
-        // them and ffmpeg fails with:
+        // Of the hwaccels we support, only QSV needs an explicit
+        // `hwdownload,format=<sw_format>` at the head of the filter chain.
+        // VideoToolbox / VAAPI / CUDA / D3D11VA all auto-transfer decoded
+        // frames to system memory by default (when no
+        // `-hwaccel_output_format` is set), so the CPU filter chain reads
+        // them directly. QSV's decoder is the outlier: it leaves frames
+        // in qsv-format on the GPU and the auto_scale filter ffmpeg tries
+        // to insert can't bridge them, producing:
         //   "Impossible to convert between the formats supported by the
         //    filter 'Parsed_fps_0' and the filter 'auto_scale_0'"
+        // hwdownload (with a probe-derived single sw_format — nv12 for
+        // 8-bit, p010le for 10-bit; alternation does NOT work) bridges
+        // QSV cleanly.
         //
-        // Fix: explicitly download GPU frames to CPU memory via
-        // `hwdownload,format=<sw_format>` at the start of the filter chain.
-        // <sw_format> MUST match the hwframe's actual sw_format — using an
-        // alternation `nv12|p010le` does NOT auto-fall-back: ffmpeg picks
-        // the first option, and if it isn't in the device's
-        // valid_sw_formats list, the entire filter graph aborts with
-        // "Invalid output format … for hwframe download". So we probe the
-        // source bit depth in advance: 8-bit codec → nv12, 10-bit → p010le.
-        //
-        // Skip for VideoToolbox: bare `-hwaccel` already auto-transfers to
-        // CPU frames, so prepending hwdownload there would fail (there's
-        // nothing on the GPU side to download).
-        var needsHwdownload = hwaccelArgs is { Count: > 0 } && (
-            hwaccelArgs.Contains("qsv") ||
-            hwaccelArgs.Contains("vaapi") ||
-            hwaccelArgs.Contains("cuda") ||
-            hwaccelArgs.Contains("d3d11va"));
+        // Earlier versions of this plugin (v1.1.28–v1.1.32) added the
+        // hwdownload prefix to VAAPI / CUDA / D3D11VA as well. That was
+        // an over-generalization from a single QSV bug report and
+        // *broke* hardware decode for those users by attempting to
+        // "download" frames that were already on CPU — auto_scale then
+        // failed in the opposite direction. Reverted in v1.1.33 to
+        // match v1.1.25's working behavior for those three.
+        var needsHwdownload = hwaccelArgs is { Count: > 0 } && hwaccelArgs.Contains("qsv");
         var hwSwFormat = is10BitSource ? "p010le" : "nv12";
         var hwdownloadPrefix = needsHwdownload ? $"hwdownload,format={hwSwFormat}," : string.Empty;
 
