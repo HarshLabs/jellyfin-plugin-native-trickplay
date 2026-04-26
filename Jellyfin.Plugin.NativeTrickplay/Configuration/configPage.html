@@ -675,10 +675,36 @@
 
                         <div class="ntp-form-row">
                             <div class="ntp-label">
-                                <span class="ntp-label-name">Concurrent encodes</span>
-                                <span class="ntp-label-help">How many items to encode in parallel. <code>1</code> is safest; <code>2</code>–<code>4</code> if your CPU and disk can handle it. Higher values can starve other Jellyfin transcodes — watch system load. <em>Requires server restart to take effect.</em></span>
+                                <span class="ntp-label-name">Encoder preset</span>
+                                <span class="ntp-label-help">x264 speed/quality tradeoff. <code>ultrafast</code> (default) is the right choice — every output frame is an IDR (no motion estimation work for slower presets to optimize), output is 320p, and the visual difference vs slower presets is invisible at this resolution. Slower presets cost 2–10× more CPU per encode for no perceptible thumbnail benefit. Lower this only if you've raised the thumbnail height to 480p+ AND care about crispness.</span>
                             </div>
-                            <input id="MaxConcurrentGenerations" type="number" class="ntp-input" min="1" max="8" />
+                            <select id="IframePreset" class="ntp-input">
+                                <option value="ultrafast">ultrafast (recommended)</option>
+                                <option value="superfast">superfast</option>
+                                <option value="veryfast">veryfast</option>
+                                <option value="faster">faster</option>
+                                <option value="fast">fast</option>
+                                <option value="medium">medium</option>
+                                <option value="slow">slow</option>
+                                <option value="slower">slower</option>
+                                <option value="veryslow">veryslow</option>
+                            </select>
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Concurrent encodes</span>
+                                <span class="ntp-label-help">How many items to encode in parallel. <code>1</code> is safest; <code>2</code>–<code>4</code> if your CPU and disk can handle it. Up to <code>16</code> on beefy boxes — practical ceiling is roughly your CPU core count divided by <em>Threads per encode</em>. Higher values can starve other Jellyfin transcodes — watch system load. <em>Requires server restart to take effect.</em></span>
+                            </div>
+                            <input id="MaxConcurrentGenerations" type="number" class="ntp-input" min="1" max="16" />
+                        </div>
+
+                        <div class="ntp-form-row">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Threads per encode</span>
+                                <span class="ntp-label-help">Threads each ffmpeg invocation uses. <code>1</code> (default) prevents thread oversubscription when Concurrent encodes > 1 — without this cap, each ffmpeg auto-uses all cores, so 4 concurrent on an 8-core box becomes 32-thread contention with massive context-switch overhead. Pinning to 1 thread per job typically gives 2–4× better aggregate throughput on bulk encodes. Set to <code>0</code> for ffmpeg's auto-detect (only useful if Concurrent encodes = 1, where you want one job to use all cores).</span>
+                            </div>
+                            <input id="EncodeThreadsPerJob" type="number" class="ntp-input" min="0" max="32" />
                         </div>
 
                         <div class="ntp-form-row">
@@ -856,7 +882,11 @@
                 document.querySelector('#IframeWidth').value = cfg.IframeWidth;
                 document.querySelector('#IframeCrf').value = cfg.IframeCrf;
                 document.querySelector('#IframeIntervalSeconds').value = cfg.IframeIntervalSeconds;
+                document.querySelector('#IframePreset').value = cfg.IframePreset || 'ultrafast';
                 document.querySelector('#MaxConcurrentGenerations').value = cfg.MaxConcurrentGenerations;
+                // 0 is a valid value (= ffmpeg auto), so don't fall through on falsy.
+                document.querySelector('#EncodeThreadsPerJob').value =
+                    (cfg.EncodeThreadsPerJob == null || cfg.EncodeThreadsPerJob < 0) ? 1 : cfg.EncodeThreadsPerJob;
                 document.querySelector('#WarmupDelaySeconds').value = (cfg.WarmupDelaySeconds && cfg.WarmupDelaySeconds > 0) ? cfg.WarmupDelaySeconds : 30;
                 document.querySelector('#ResumeInterruptedEncodesOnStartup').checked = cfg.ResumeInterruptedEncodesOnStartup !== false;
                 document.querySelector('#EncodeOnLibraryAdd').checked = !!cfg.EncodeOnLibraryAdd;
@@ -880,7 +910,12 @@
                 cfg.IframeWidth = parseInt(document.querySelector('#IframeWidth').value, 10);
                 cfg.IframeCrf = parseInt(document.querySelector('#IframeCrf').value, 10);
                 cfg.IframeIntervalSeconds = parseFloat(document.querySelector('#IframeIntervalSeconds').value);
-                cfg.MaxConcurrentGenerations = Math.max(1, Math.min(8, parseInt(document.querySelector('#MaxConcurrentGenerations').value, 10) || 1));
+                cfg.IframePreset = document.querySelector('#IframePreset').value || 'ultrafast';
+                cfg.MaxConcurrentGenerations = Math.max(1, Math.min(16, parseInt(document.querySelector('#MaxConcurrentGenerations').value, 10) || 1));
+                // Threads cap: clamp to [0, 32]; 0 means "let ffmpeg auto-pick".
+                var threadsRaw = parseInt(document.querySelector('#EncodeThreadsPerJob').value, 10);
+                if (isNaN(threadsRaw)) threadsRaw = 1;
+                cfg.EncodeThreadsPerJob = Math.max(0, Math.min(32, threadsRaw));
                 cfg.WarmupDelaySeconds = Math.max(5, Math.min(300, parseInt(document.querySelector('#WarmupDelaySeconds').value, 10) || 30));
                 cfg.ResumeInterruptedEncodesOnStartup = document.querySelector('#ResumeInterruptedEncodesOnStartup').checked;
                 cfg.EncodeOnLibraryAdd = document.querySelector('#EncodeOnLibraryAdd').checked;

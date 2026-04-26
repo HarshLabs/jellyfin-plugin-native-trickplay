@@ -498,11 +498,12 @@ Jellyfin plugin XML config.
 |---|---|---|---|---|
 | Enabled | true | bool | Master switch. Off = no master-playlist injection, no warmup, no encodes | No |
 | Iframe width | 320 | px | Output thumbnail height (sic — width in code, used as scale=-2:N height) | No (new encodes only) |
-| Iframe interval | 1.0 s | ≥1 | Seconds between thumbnails (1 = densest, larger = smaller cache) | No (new encodes only) |
+| Iframe interval | 2.0 s | ≥1 | Seconds between thumbnails (Apple's HLS spec recommends 2-5s; lower = denser scrubbing + bigger cache + 2× encode work). | No (new encodes only) |
 | Iframe CRF | 32 | 18–40 | x264 quality (lower = larger files) | No (new encodes only) |
-| Iframe preset | ultrafast | x264 preset | Encode speed/size tradeoff | No (new encodes only) |
+| Iframe preset | ultrafast | x264 preset | Encode speed/quality tradeoff. **`ultrafast` is the right choice** — every output frame is an IDR (no motion estimation work for slower presets to optimize), output is 320p, visual difference vs slower presets is invisible. Slower presets cost 2-10× more CPU per encode for no perceptible benefit on trickplay thumbnails. | No (new encodes only) |
 | Use hardware decoding | true | bool | Read Jellyfin's hwaccel setting; off forces software | No |
-| Concurrent encodes | 1 | 1–8 | Max parallel ffmpegs | **Yes** |
+| Concurrent encodes | 1 | 1–16 | Max parallel ffmpegs. Practical ceiling is your CPU core count divided by *Threads per encode* — pushing past that just thrashes the scheduler. | **Yes** |
+| Threads per encode | 1 | 0–32 | Threads each ffmpeg invocation may use. `1` (default) prevents thread oversubscription with multiple Concurrent encodes — without this cap, each ffmpeg auto-detects "all cores", so 4 concurrent on an 8-core box becomes 32-thread contention. Pinning to 1 thread/job typically gives 2-4× better aggregate throughput on bulk encodes. `0` = ffmpeg auto-detect (use only when Concurrent encodes = 1). | No (new encodes only) |
 | Warmup delay | 30 s | 5–300 | Seconds after PlaybackStart before encoding | No |
 | Resume interrupted encodes | true | bool | StartupResumeService toggle | No |
 | Encode on library add | false | bool | Queue an encode when the library scanner imports a new video item (Normal priority) | No |

@@ -19,16 +19,41 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool Enabled { get; set; } = true;
     public int IframeWidth { get; set; } = 320;
     public int IframeCrf { get; set; } = 32;
+    /// <summary>
+    /// x264 encoder preset. <c>ultrafast</c> (default) is the right choice for
+    /// 320p I-frame-only thumbnails — every output frame is an IDR (no motion
+    /// estimation), output is tiny, and the visual quality difference vs slower
+    /// presets is unmeasurable at this resolution and use case. Slower presets
+    /// (<c>fast</c> → <c>veryslow</c>) cost 2–10× more CPU per encode for no
+    /// perceptible benefit on trickplay thumbnails.
+    /// Lower this only if you've raised IframeWidth to 480p+ AND care about
+    /// thumbnail crispness for some reason.
+    /// </summary>
     public string IframePreset { get; set; } = "ultrafast";
     public int MaxConcurrentGenerations { get; set; } = 1;
 
     /// <summary>
-    /// Seconds between trickplay thumbnails. 1.0 = one I-frame per second of
-    /// source (smooth scrubbing UX, ~30 MB cache for a 24-min episode at 320p).
-    /// Larger values trade scrubbing granularity for cache size — set to e.g.
-    /// 5.0 if disk space is tight. Must be &gt;= 1.0.
+    /// Seconds between trickplay thumbnails. 2.0 = one I-frame every two
+    /// seconds of source (smooth-enough scrubbing UX matching Apple's HLS
+    /// authoring spec recommendation of 2-5s). Halving the frame count
+    /// halves the encode work — exactly linear speedup with no impact on
+    /// scrubbing quality for human use. Set to 1.0 for the densest possible
+    /// scrubbing, or 5.0+ if disk space is tight. Must be &gt;= 1.0.
     /// </summary>
-    public double IframeIntervalSeconds { get; set; } = 1.0;
+    public double IframeIntervalSeconds { get; set; } = 2.0;
+
+    /// <summary>
+    /// Threads each ffmpeg encode is allowed to use. Default <c>1</c> prevents
+    /// thread oversubscription when MaxConcurrentGenerations > 1: without
+    /// this cap, every ffmpeg auto-detects "all cores" so 4 concurrent on an
+    /// 8-core box becomes 32-thread contention with massive context-switch
+    /// overhead. Pinning to 1 thread per job typically gives 2–4× better
+    /// aggregate throughput on bulk encodes.
+    /// Set to <c>0</c> to let ffmpeg auto-pick — only useful when running a
+    /// single encode at a time (MaxConcurrentGenerations=1) on a multi-core
+    /// box, where you want one job to use all cores.
+    /// </summary>
+    public int EncodeThreadsPerJob { get; set; } = 1;
     /// <summary>
     /// When true, follows Jellyfin's global "Hardware Acceleration" setting
     /// (Dashboard → Playback → Transcoding) and adds the appropriate

@@ -1080,6 +1080,18 @@ public sealed class IframeAssetCache
             "-colorspace", "bt709",
             "-color_range", "tv",
         });
+
+        // Cap encoder threads to avoid oversubscription with multiple
+        // concurrent encodes. Default is 1 thread per job — when
+        // MaxConcurrentGenerations > 1, each ffmpeg would otherwise
+        // auto-detect "all cores" and produce N×cores threads fighting for
+        // CPU. Setting EncodeThreadsPerJob=0 disables the cap (use ffmpeg's
+        // auto-thread heuristic), useful for the single-encode case.
+        if (cfg.EncodeThreadsPerJob > 0)
+        {
+            args.Add("-threads");
+            args.Add(cfg.EncodeThreadsPerJob.ToString(CultureInfo.InvariantCulture));
+        }
         _ = variant; // single variant — kept in API for callers; intentionally unused here
         _ = intervalStr;
 
