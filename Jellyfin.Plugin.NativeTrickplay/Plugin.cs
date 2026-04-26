@@ -75,6 +75,20 @@ public class PluginConfiguration : BasePluginConfiguration
     /// to 5–300s.
     /// </summary>
     public int WarmupDelaySeconds { get; set; } = 30;
+
+    /// <summary>
+    /// When true, queues an iframe encode at Normal priority every time
+    /// Jellyfin's library scanner adds a new video item. Mirrors
+    /// Jellyfin's own "Extract trickplay images during the library scan"
+    /// option — but for native HLS trickplay rather than the BIF/JPEG
+    /// sprite path.
+    /// Default off because a brand-new library import can fire thousands
+    /// of ItemAdded events; opt in once you've sized
+    /// MaxConcurrentGenerations appropriately. The daily pre-generate
+    /// task at 4 AM also covers uncached items, so leaving this off just
+    /// means new items get cached overnight instead of immediately.
+    /// </summary>
+    public bool EncodeOnLibraryAdd { get; set; } = false;
 }
 
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
@@ -122,6 +136,11 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         // (plugin upgrade, crash, power loss) and re-queues them 30s after
         // boot so the cache self-heals without manual intervention.
         serviceCollection.AddHostedService<StartupResumeService>();
+        // Optional: queue an encode every time the library scanner adds a
+        // new video item. Gated by the EncodeOnLibraryAdd config flag
+        // (default off). Mirrors Jellyfin's "Extract trickplay images
+        // during the library scan" toggle.
+        serviceCollection.AddHostedService<LibraryAddListener>();
         serviceCollection.PostConfigure<MvcOptions>(opts =>
         {
             opts.Filters.AddService<MasterPlaylistInjector>();

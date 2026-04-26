@@ -38,7 +38,7 @@ After install: **Dashboard → Plugins → Native Trickplay**
   (default 1), CRF (default 32), x264 preset (default ultrafast),
   concurrent encodes (default 1, max 8), warmup delay seconds (default
   30, range 5–300), use hardware decoding (follows Jellyfin's global
-  hwaccel setting)
+  hwaccel setting), encode on library add (default off)
 - **Cache pruning:** orphan removal (default on), age-based eviction
   (default 90 days, `0` to disable), LRU size cap (`0` = disabled)
 - **Auto-resume interrupted encodes** (default on)
@@ -68,9 +68,9 @@ same page.
    on cold caches.
 4. **Triggers** — playback start (deferred warmup), dashboard
    Generate/Regenerate, daily 4 AM pre-gen task, startup auto-resume of
-   interrupted encodes. Priority queue: playback High, admin/pre-gen
-   Normal, startup-resume Normal — playback always leapfrogs background
-   work.
+   interrupted encodes, optional encode-on-library-add. Priority queue:
+   playback High, admin/pre-gen/library-add Normal, startup-resume
+   Normal — playback always leapfrogs background work.
 
 For the deep dive (every trigger, the priority queue, all the failure
 modes, all the configuration knobs), read
