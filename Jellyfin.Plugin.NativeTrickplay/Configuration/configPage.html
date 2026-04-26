@@ -961,11 +961,42 @@
 
         function ntpComputePercent(state) {
             // Cap at 99 so the bar never shows 100% before the encode
-            // actually finishes — the estimate can undershoot, especially
-            // on high-detail content.
+            // actually finishes — both signals can land at-or-past their
+            // target a beat before ffmpeg finalizes mux + the box scan
+            // and PTS probe complete.
+
+            // Time-based progress (preferred): ffmpeg's `-progress pipe:1`
+            // out_time_us reports microseconds of source consumed, divided
+            // by the source's container-reported duration. This matches
+            // the user's mental model ("we're 8m into a 22m episode = 36%")
+            // and is independent of how well the byte estimate matches.
+            if (state.EncodedSourceMicros && state.SourceDurationMicros && state.SourceDurationMicros > 0) {
+                var rawTime = (state.EncodedSourceMicros / state.SourceDurationMicros) * 100;
+                return Math.max(0, Math.min(99, Math.round(rawTime)));
+            }
+            // Byte-based fallback: rough estimate (iframe count × bytes-per-
+            // frame). Used when source duration is unknown — live recordings,
+            // damaged metadata. High-detail content can drive PartialBytes
+            // well past EstimatedTotalBytes, in which case the cap pegs the
+            // bar at 99 until the encode actually finishes.
             if (!state.PartialBytes || !state.EstimatedTotalBytes || state.EstimatedTotalBytes <= 0) return null;
-            var raw = (state.PartialBytes / state.EstimatedTotalBytes) * 100;
-            return Math.max(0, Math.min(99, Math.round(raw)));
+            var rawBytes = (state.PartialBytes / state.EstimatedTotalBytes) * 100;
+            return Math.max(0, Math.min(99, Math.round(rawBytes)));
+        }
+
+        // ETA from ffmpeg's `speed=N.NNx` line: how many wall-clock seconds
+        // until source-consumed reaches source-duration, given current speed.
+        // Returns a short human string ("12s", "2m 30s") or null when we
+        // can't compute it (no time-based progress, no speed signal yet, or
+        // already past the source duration).
+        function ntpComputeEta(state) {
+            if (!state.EncodingSpeed || state.EncodingSpeed <= 0) return null;
+            if (!state.SourceDurationMicros || !state.EncodedSourceMicros) return null;
+            var remainSec = (state.SourceDurationMicros - state.EncodedSourceMicros) / 1e6 / state.EncodingSpeed;
+            if (!isFinite(remainSec) || remainSec < 0) return null;
+            var sec = Math.round(remainSec);
+            if (sec < 60) return sec + 's';
+            return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's';
         }
 
         function ntpBuildBusyCell(state) {
@@ -1046,6 +1077,9 @@
                         Status: inflight.Status,
                         PartialBytes: inflight.PartialBytes,
                         EstimatedTotalBytes: inflight.EstimatedTotalBytes,
+                        EncodedSourceMicros: inflight.EncodedSourceMicros,
+                        SourceDurationMicros: inflight.SourceDurationMicros,
+                        EncodingSpeed: inflight.EncodingSpeed,
                         StartedUtc: inflight.StartedUtc,
                         ServerUtc: p.ServerUtc,
                     });
@@ -1217,20 +1251,33 @@
                     '<th>Item</th>' +
                     '<th style="width:8em;">Status</th>' +
                     '<th style="width:7em;">Elapsed</th>' +
+                    '<th style="width:7em;">ETA</th>' +
                     '<th style="width:9em;">Output</th>' +
                     '<th style="width:6em;">Progress</th>' +
                     '</tr></thead><tbody>' +
                     visible.map(function (it) {
                         var pct = ntpComputePercent(it);
+                        var eta = ntpComputeEta(it);
+                        var speed = it.EncodingSpeed ? it.EncodingSpeed.toFixed(2) + 'x' : null;
                         var badgeText = it.Status === 'running'
                             ? (pct !== null ? '▶ running · ' + pct + '%' : '▶ running')
                             : '⏸ queued';
                         var badgeClass = it.Status === 'running' ? 'ntp-badge-running' : 'ntp-badge-queued';
                         var badge = '<span class="ntp-badge ' + badgeClass + '">' + badgeText + '</span>';
+                        // ETA cell shows the projected remaining wall time
+                        // and the current encode speed multiplier in muted
+                        // text underneath, so an admin can see *why* an item
+                        // is slow (e.g. 0.4x = encoder is the bottleneck).
+                        var etaCell = '—';
+                        if (it.Status === 'running') {
+                            if (eta) etaCell = eta + (speed ? ' <span style="opacity:0.5;font-size:0.85em;">· ' + speed + '</span>' : '');
+                            else if (speed) etaCell = '<span style="opacity:0.7;">' + speed + '</span>';
+                        }
                         return '<tr>' +
                             '<td>' + ntpEscape(it.ItemName) + '</td>' +
                             '<td>' + badge + '</td>' +
                             '<td>' + (it.Status === 'running' ? ntpFmtElapsed(it.StartedUtc, p.ServerUtc) : '—') + '</td>' +
+                            '<td>' + etaCell + '</td>' +
                             '<td>' + (it.PartialBytes ? ntpFmtBytes(it.PartialBytes) : '—') + '</td>' +
                             '<td>' + (pct !== null ? pct + '%' : '—') + '</td>' +
                             '</tr>';

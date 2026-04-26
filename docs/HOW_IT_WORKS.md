@@ -442,16 +442,38 @@ per-library breakdown with progress bars, refresh button.
 
 **Encoding in progress** (`GET /Plugins/NativeTrickplay/Progress`) —
 polls every 2 s when active, every 15 s when idle. Shows running items
-first (pinned), then queued in submission order. Each running row shows
-`▶ encoding · NN%`, elapsed time, partial output bytes, and a Progress
-column. Default cap 10 rows; "Show all (N)" expands to a scrollable
-list. Auto-disappears when nothing is in flight.
+first (pinned), then queued in submission order. Each running row
+displays five live columns:
 
-> The **percent estimate** is `partial_bytes / estimated_total_bytes`,
-> where `estimated_total_bytes ≈ frames × 14.4 KB × (width / 480)²`,
-> calibrated from real encodes. Real outputs land within ~±20%; the UI
-> caps the displayed percent at 99 % so it never reads "100%" before the
-> encode actually finishes.
+| Column | Meaning |
+|---|---|
+| **Status** | `▶ running · NN%` (or `⏸ queued`). Percent is the same value as the Progress column, embedded in the badge for at-a-glance scanning. |
+| **Elapsed** | Wall-clock time since this item's slot was acquired and ffmpeg actually started. *Not* time since it was originally queued — restamped at queued→running transition so a row that just got promoted from a multi-thousand-item bulk job displays a fresh elapsed counter, not the age of the bulk job. |
+| **ETA** | Projected wall-clock seconds until the encode finishes, computed from ffmpeg's reported `speed` multiplier: `(source_duration − source_consumed) / speed`. Shown as `2m 15s · 1.83x` — duration plus the current speed multiplier in muted text underneath, so an admin can see *why* it's slow (e.g. `0.4x` = encoder is the bottleneck). Shows just the speed (no ETA) if `speed` is known but the source duration isn't. |
+| **Output** | Size of the partial `.tmp` segment file on disk right now (cheap `FileInfo.Length` per poll). Lets you eyeball whether bytes are actually being written. |
+| **Progress** | Percent done. See estimator note below. |
+
+> **How the percent is computed** — primary signal is **time-based**:
+> ffmpeg is launched with `-progress pipe:1 -nostats` and the plugin
+> parses the `out_time_us=` lines off stdout (microseconds of source
+> consumed). Percent = `out_time_us / source_duration_us`. This matches
+> the user's mental model ("we're 8 m into a 22 m episode = 36 %") and
+> is independent of whether the byte estimate matches actual output.
+>
+> **Fallback** when the source has no known duration (live recordings,
+> damaged metadata): a byte-size estimate `partial_bytes /
+> estimated_total_bytes`, where `estimated_total_bytes ≈ frames ×
+> 14.4 KB × (width / 480)²`. High-detail content can blow past this
+> estimate, so the cap below applies.
+>
+> **Cap at 99 %** — the displayed percent is `min(99, raw)` regardless
+> of which signal feeds it. The encode isn't "done" until ffmpeg exits
+> *and* the mp4-box scan + PTS probe + atomic file rename all complete;
+> capping prevents the bar from briefly reading 100 % during that
+> finalization window.
+
+Default cap 10 rows; "Show all (N)" expands to a scrollable list.
+Auto-disappears when nothing is in flight.
 
 **Find & select items** (`GET /Plugins/NativeTrickplay/Items`):
 - Tokenized search (case + accent insensitive), AND-matched across Name +
@@ -520,7 +542,7 @@ Jellyfin plugin XML config.
 | Cache validation logic | `Hls/IframeAssetCache.cs` → `TryGetCached` |
 | Concurrency / dedup / priority queue | `Hls/IframeAssetCache.cs` → `GetOrCreateAsync`, `AcquireSlotAsync`, `ReleaseSlot`, `PromoteToPriority` |
 | Inflight cleanup (fast-path + finally) | `Hls/IframeAssetCache.cs` → `GenerateAsync` |
-| Progress estimator | `Hls/IframeAssetCache.cs` → `EstimateTotalEncodedBytes` |
+| Progress signals (time-based via ffmpeg `-progress`, byte-size fallback) | `Hls/IframeAssetCache.cs` → `RunFfmpegAsync` (out_time_us / speed parser) + `EstimateTotalEncodedBytes` |
 | Master-playlist rewriting | `Hls/MasterPlaylistInjector.cs` → `OnResultExecutionAsync` |
 | `iframe.m3u8` controller (HEAD probe + cache miss stub + `X-Trickplay-Status` header) | `Api/IframeHlsController.cs` |
 | Dashboard HTTP API | `Api/IframeAdminController.cs` |

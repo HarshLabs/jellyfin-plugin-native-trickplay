@@ -34,7 +34,10 @@ public sealed record InflightState(
     DateTime StartedUtc,
     string Status,
     long? PartialBytes,
-    long? EstimatedTotalBytes);
+    long? EstimatedTotalBytes,
+    long? EncodedSourceMicros,
+    long? SourceDurationMicros,
+    double? EncodingSpeed);
 
 public sealed class IframeAssetCache
 {
@@ -87,7 +90,28 @@ public sealed class IframeAssetCache
         // tuned bytes-per-iframe constant. Real output usually lands within
         // ±20% of this; the UI caps the displayed percent at 99 to avoid
         // flickering past 100 if the estimate undershoots.
+        // Used as a fallback for items with unknown source duration; the
+        // primary progress signal is now time-based (see below).
         public long? EstimatedTotalBytes { get; set; }
+        // Microseconds of source video that ffmpeg has consumed so far,
+        // updated continuously from `-progress pipe:1` output (out_time_us
+        // line). Combined with SourceDurationMicros this gives the dashboard
+        // a real, monotonic progress signal — independent of how well the
+        // byte estimate matches actual output. Null until the first progress
+        // line lands or for sources without a known duration.
+        public long? EncodedSourceMicros { get; set; }
+        // Source video duration in microseconds, derived once from
+        // item.RunTimeTicks at encode start. Null for items without metadata
+        // duration (live recordings, damaged files); when null the UI falls
+        // back to byte-based progress.
+        public long? SourceDurationMicros { get; init; }
+        // Current encoding speed multiplier vs realtime (e.g. 2.13x means
+        // 1 minute of source consumed per 28s of wall time). Sourced from
+        // ffmpeg's `speed=N.NNx` progress line. Used by the UI to render an
+        // accurate ETA: eta_sec = (SourceDurationMicros - EncodedSourceMicros)
+        // / 1e6 / EncodingSpeed. Null for items without a known source
+        // duration or before the first progress block lands.
+        public double? EncodingSpeed { get; set; }
     }
 
     public IframeAssetCache(
@@ -503,6 +527,9 @@ public sealed class IframeAssetCache
             Name = item.Name ?? "(unnamed)",
             Status = "queued",
             EstimatedTotalBytes = EstimateTotalEncodedBytes(item),
+            // RunTimeTicks is in 100-nanosecond ticks; divide by 10 to get
+            // microseconds, the unit ffmpeg's `-progress pipe:1` emits.
+            SourceDurationMicros = item.RunTimeTicks is long ticks and > 0 ? ticks / 10 : null,
         };
         _inflightProgress[key] = progress;
 
@@ -529,7 +556,7 @@ public sealed class IframeAssetCache
             progress.TmpSegmentPath = tmpSegmentPath;
 
             var ffmpegSw = Stopwatch.StartNew();
-            await RunFfmpegAsync(sourcePath, tmpSegmentPath, variant, ct).ConfigureAwait(false);
+            await RunFfmpegAsync(sourcePath, tmpSegmentPath, variant, progress, ct).ConfigureAwait(false);
             ffmpegSw.Stop();
             var encodedBytes = File.Exists(tmpSegmentPath) ? new FileInfo(tmpSegmentPath).Length : 0;
             _logger.LogInformation(
@@ -604,7 +631,9 @@ public sealed class IframeAssetCache
                 try { if (File.Exists(p.TmpSegmentPath)) partial = new FileInfo(p.TmpSegmentPath).Length; }
                 catch (IOException) { /* file briefly inaccessible mid-write — surface as null */ }
             }
-            yield return new InflightState(p.ItemId, p.Name, p.StartedUtc, p.Status, partial, p.EstimatedTotalBytes);
+            yield return new InflightState(
+                p.ItemId, p.Name, p.StartedUtc, p.Status, partial,
+                p.EstimatedTotalBytes, p.EncodedSourceMicros, p.SourceDurationMicros, p.EncodingSpeed);
         }
     }
 
@@ -638,7 +667,7 @@ public sealed class IframeAssetCache
         return total > 0 ? (long)total : null;
     }
 
-    private async Task RunFfmpegAsync(string inputPath, string outputPath, IframeVariant variant, CancellationToken ct)
+    private async Task RunFfmpegAsync(string inputPath, string outputPath, IframeVariant variant, InflightProgress? progress, CancellationToken ct)
     {
         var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
         var (isHdrSource, is10BitSource) = ProbeSourceVideo(inputPath);
@@ -656,9 +685,37 @@ public sealed class IframeAssetCache
             "[NativeTrickplay] ffmpeg cmd: {Encoder} {Args}",
             _encoder.EncoderPath, string.Join(' ', primaryArgs));
 
+        // ffmpeg's `-progress pipe:1` emits key=value lines every 0.5s. We
+        // care about `out_time_us` — microseconds of source consumed so far —
+        // which combined with the source duration gives a real, monotonic
+        // progress signal for the dashboard. `out_time_ms` is also emitted
+        // by some ffmpeg builds with the same microsecond meaning (despite
+        // the name); accept either as a fallback.
+        Action<string>? onLine = progress is null ? null : line =>
+        {
+            int eq = line.IndexOf('=');
+            if (eq <= 0) return;
+            var key = line.AsSpan(0, eq);
+            var val = line.AsSpan(eq + 1);
+            if ((key.SequenceEqual("out_time_us") || key.SequenceEqual("out_time_ms"))
+                && long.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out var us))
+            {
+                progress.EncodedSourceMicros = us;
+            }
+            // speed=2.13x — multiplier vs realtime. Strip the trailing 'x'
+            // before parsing. Occasionally ffmpeg emits "N/A" in the very
+            // first block before warm-up; ignore that.
+            else if (key.SequenceEqual("speed") && val.Length > 1 && val[^1] == 'x'
+                && double.TryParse(val[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var speed)
+                && speed > 0)
+            {
+                progress.EncodingSpeed = speed;
+            }
+        };
+
         try
         {
-            await RunProcessAsync(_encoder.EncoderPath, primaryArgs, ct).ConfigureAwait(false);
+            await RunProcessAsync(_encoder.EncoderPath, primaryArgs, ct, stdoutLineCallback: onLine).ConfigureAwait(false);
             return;
         }
         catch (InvalidOperationException ex)
@@ -676,8 +733,18 @@ public sealed class IframeAssetCache
                 TailLines(ex.Message, 12));
         }
 
+        // Reset progress before the software-decode retry so the dashboard
+        // doesn't briefly display stale "near 100%" from the failed attempt
+        // before the new run starts emitting fresh out_time_us values.
+        if (progress is not null)
+        {
+            progress.EncodedSourceMicros = 0;
+            progress.EncodingSpeed = null;
+        }
+
         await RunProcessAsync(_encoder.EncoderPath,
-            BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs: null, isHdrSource, is10BitSource), ct).ConfigureAwait(false);
+            BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs: null, isHdrSource, is10BitSource), ct,
+            stdoutLineCallback: onLine).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -763,6 +830,14 @@ public sealed class IframeAssetCache
         var args = new List<string>(48)
         {
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+            // Stream key=value progress lines to stdout every 0.5s so the
+            // dashboard can render real time-based progress (out_time_us /
+            // source duration) instead of relying on a byte-size estimate
+            // that often pegs the bar at 99% mid-encode for high-detail
+            // content. -nostats suppresses ffmpeg's default stderr "frame=
+            // … time=…" status line which would otherwise duplicate this
+            // signal in noisier form.
+            "-progress", "pipe:1", "-nostats",
         };
 
         // Hardware decode args go BEFORE -i.
@@ -1065,13 +1140,23 @@ public sealed class IframeAssetCache
         return durations;
     }
 
-    private async Task<string> RunProcessAsync(string fileName, IReadOnlyList<string> args, CancellationToken ct, bool captureStdout = false)
+    private async Task<string> RunProcessAsync(
+        string fileName,
+        IReadOnlyList<string> args,
+        CancellationToken ct,
+        bool captureStdout = false,
+        Action<string>? stdoutLineCallback = null)
     {
+        // When a line callback is supplied, force stdout redirection — the
+        // caller (RunFfmpegAsync) needs to consume `-progress pipe:1` output
+        // for live progress updates regardless of whether captureStdout is
+        // also requested.
+        var redirectStdout = captureStdout || stdoutLineCallback is not null;
         var psi = new ProcessStartInfo
         {
             FileName = fileName,
             RedirectStandardError = true,
-            RedirectStandardOutput = captureStdout,
+            RedirectStandardOutput = redirectStdout,
             UseShellExecute = false,
             CreateNoWindow = true
         };
@@ -1083,7 +1168,32 @@ public sealed class IframeAssetCache
         proc.Start();
 
         var stderrTask = proc.StandardError.ReadToEndAsync(ct);
-        var stdoutTask = captureStdout ? proc.StandardOutput.ReadToEndAsync(ct) : Task.FromResult(string.Empty);
+        Task<string> stdoutTask;
+        if (stdoutLineCallback is not null)
+        {
+            // Stream stdout line-by-line off the threadpool so the callback
+            // fires as ffmpeg emits progress (~every 0.5s) instead of only
+            // once at process exit. Accumulate the full output too so the
+            // captureStdout=true callers (currently none for this path, but
+            // a future caller that wants both progress + final stdout would
+            // get correct semantics) still see what they expect.
+            stdoutTask = Task.Run(async () =>
+            {
+                var sb = captureStdout ? new System.Text.StringBuilder() : null;
+                string? line;
+                while ((line = await proc.StandardOutput.ReadLineAsync(ct).ConfigureAwait(false)) is not null)
+                {
+                    try { stdoutLineCallback(line); }
+                    catch { /* swallow callback exceptions — never let UI plumbing kill an encode */ }
+                    sb?.AppendLine(line);
+                }
+                return sb?.ToString() ?? string.Empty;
+            }, ct);
+        }
+        else
+        {
+            stdoutTask = captureStdout ? proc.StandardOutput.ReadToEndAsync(ct) : Task.FromResult(string.Empty);
+        }
 
         try
         {
