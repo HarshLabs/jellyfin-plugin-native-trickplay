@@ -63,10 +63,12 @@ source video (mkv/mp4/mov/...)
     │
     ▼
   DECODE  ── -hwaccel videotoolbox / qsv / vaapi / cuda / d3d11va / drm / rkmpp ──►  (HARDWARE)
-    │       (videotoolbox auto-transfers frames to system memory; QSV / VAAPI /
-    │        CUDA / D3D11VA need an explicit `hwdownload,format=<sw_format>`
-    │        prefix where <sw_format> is nv12 for 8-bit sources, p010le for
-    │        10-bit — chosen by an ffprobe pass on stream metadata)
+    │       (most hwaccels auto-transfer frames to system memory by default,
+    │        so the CPU filter chain reads them directly. QSV is the
+    │        outlier — it leaves frames in qsv-format on the GPU, so the
+    │        plugin prepends `hwdownload,format=<sw_format>` for QSV only,
+    │        where <sw_format> is nv12 for 8-bit / p010le for 10-bit,
+    │        chosen by an ffprobe pass on stream metadata)
     ▼
   fps=N            (N = 1 / IframeIntervalSeconds — uniform thumbnail density
     │              regardless of the source's GOP layout)
@@ -114,7 +116,7 @@ computed from your IframeWidth × source aspect ratio.
 
 ## 4. Every trigger that produces a cache entry
 
-There are six places an encode can start. They all funnel through
+There are seven places an encode can start. They all funnel through
 `IframeAssetCache.GetOrCreateAsync(itemId, isPriority)`, which shares one
 de-duplication map and one priority-aware slot manager — so concurrent
 requests for the same item run only once, and high-priority requests
@@ -232,7 +234,26 @@ Catches: plugin upgrades, Jellyfin crashes (OOM, panic), power failures,
 `kill -9`. Toggle on Generation card → **Resume interrupted encodes**
 (default on).
 
-### 4.7 — Stale-encoder cleanup (prune phase 0)
+### 4.7 — Library scan adds a new item (opt-in)
+
+**Trigger:** `ILibraryManager.ItemAdded` event fires when Jellyfin's
+scanner imports a new video.
+**Service:** `LibraryAddListener`
+**Gate:** `EncodeOnLibraryAdd` config flag (default **off**).
+
+When the flag is on, every newly-added video item gets a
+`_cache.Warmup(id, isPriority: false)` call — Normal priority, so it
+yields to playback-triggered High encodes. Already-cached items are
+skipped (rare on add, possible if the file was re-imported).
+
+This mirrors Jellyfin's own "Extract trickplay images during the
+library scan" toggle but for the native-HLS path. Default off because a
+fresh library import can fire thousands of ItemAdded events; the daily
+4 AM pre-generate task already handles uncached items overnight, so
+opting out just means new items get cached overnight instead of
+immediately.
+
+### 4.8 — Stale-encoder cleanup (prune phase 0)
 
 `PruneTrickplayCacheTask` Phase 0 evicts cache directories whose
 `.source-mtime` stamp doesn't match the encoder tag the current build
@@ -315,17 +336,36 @@ forces software regardless.
 | rkmpp (Rockchip) | `-hwaccel rkmpp` |
 | amf on macOS / unknown | software-only |
 
-**`hwdownload` for non-VideoToolbox hwaccels.** VideoToolbox auto-transfers
-decoded frames to system memory; the others (QSV/VAAPI/CUDA/D3D11VA)
-leave them in GPU memory in a hardware pixel format. The CPU-only `fps`
-filter at the start of the chain can't accept those, so the plugin
-prepends `hwdownload,format=<sw_format>` where `<sw_format>` is `nv12`
-for 8-bit sources and `p010le` for 10-bit. **Bit depth is probed up
-front** (`ProbeSourceVideo` runs ffprobe to read `bits_per_raw_sample`
-and `pix_fmt`); using an alternation like `nv12|p010le` does NOT work —
-ffmpeg picks the first option and errors out if it isn't in the device's
-`valid_sw_formats`. The probe also detects HDR (PQ / HLG transfer
-characteristics).
+**`hwdownload` is QSV-only.** Of the supported hwaccels, only QSV
+needs an explicit `hwdownload,format=<sw_format>` at the head of the
+filter chain. VideoToolbox / VAAPI / CUDA / D3D11VA / DRM / RKMPP all
+auto-transfer decoded frames to system memory by default (when no
+`-hwaccel_output_format` is set), so the CPU `fps` filter reads them
+directly. QSV's decoder is the outlier — it leaves frames in qsv-format
+on the GPU, and ffmpeg's auto-inserted `auto_scale` can't bridge them,
+producing `Impossible to convert between the formats supported by the
+filter 'Parsed_fps_0' and the filter 'auto_scale_0'`. For QSV only, the
+plugin adds `hwdownload,format=<probed>` to bridge.
+
+**Bit depth is probed up front** (`ProbeSourceVideo` runs ffprobe to
+read `bits_per_raw_sample` and `pix_fmt`) so the QSV `hwdownload`
+format matches the hwframe's actual `sw_format`: `nv12` for 8-bit
+sources, `p010le` for 10-bit. Using an alternation like `nv12|p010le`
+does NOT work — ffmpeg picks the first option and errors out if it
+isn't in the device's `valid_sw_formats` list. The same probe also
+detects HDR (PQ / HLG transfer characteristics) to decide whether the
+filter chain needs the zscale + Hable tonemap stage.
+
+> **Historical note.** Plugin versions v1.1.28–v1.1.32 also added
+> `hwdownload` for VAAPI / CUDA / D3D11VA based on a single QSV bug
+> report. That over-generalization actually broke hardware decode for
+> those three hwaccels: their decoders had already auto-downloaded
+> frames to CPU memory, and the extra `hwdownload` filter caused
+> `auto_scale` to fail in the opposite direction. The plugin's
+> software-decode fallback caught the error and the encode still
+> completed, but the GPU was bypassed. v1.1.33.0 reverted to the
+> v1.1.25 behavior (bare `-hwaccel <type>`) for those three; QSV
+> still gets the bridge.
 
 **Auto-fallback to software decode** if the hwaccel handoff fails with a
 recognized error pattern (`Failed to transfer data to output frame`,
@@ -442,6 +482,7 @@ Jellyfin plugin XML config.
 | Concurrent encodes | 1 | 1–8 | Max parallel ffmpegs | **Yes** |
 | Warmup delay | 30 s | 5–300 | Seconds after PlaybackStart before encoding | No |
 | Resume interrupted encodes | true | bool | StartupResumeService toggle | No |
+| Encode on library add | false | bool | Queue an encode when the library scanner imports a new video item (Normal priority) | No |
 | Cache directory | (empty) | path | Where iframe assets live; empty = Jellyfin default | No (new encodes only) |
 | Prune orphans | true | bool | Pruner Phase 1 | No |
 | Max age days | 90 | 0–N | Pruner Phase 2 (`0` disables) | No |
@@ -463,7 +504,8 @@ Jellyfin plugin XML config.
 | You disable the plugin | Existing caches preserved on disk. Master-playlist injection stops; AVPlayer falls back to no trickplay. Re-enable to pick up where you left off. |
 | You evict an item via the dashboard | Cache directory deleted. Next access re-encodes from scratch. Eviction is in-flight aware: items currently encoding are silently skipped. |
 | Source has unusual codec or bit-depth probe is wrong | hwaccel decode fails; plugin retries with software decode and succeeds. One `[WRN]` line in the log; encode completes. |
-| Library scan adds 500 new items | They appear in /Items with `cached=false`; not encoded until something triggers them (next pre-gen run, manual Generate, or first playback). |
+| Library scan adds 500 new items, **`Encode on library add` off** (default) | They appear in /Items with `cached=false`; not encoded until something triggers them (next 4 AM pre-gen run, manual Generate, or first playback). |
+| Library scan adds 500 new items, **`Encode on library add` on** | Each one fires `LibraryAddListener.OnItemAdded` and gets a Normal-priority Warmup. The slot manager processes them in submission order, capped by `MaxConcurrentGenerations`. Playback-triggered encodes still leapfrog them via the priority queue. |
 | HDR client (JellyseerTV) plays an uncached HDR item | HEAD-probe sees `X-Trickplay-Status: encoding`; client omits the I-frame variant from its synthetic master; primary playback starts immediately; background encode runs; next play of the same item gets `ready` and trickplay works. |
 
 ---
@@ -483,6 +525,7 @@ Jellyfin plugin XML config.
 | `iframe.m3u8` controller (HEAD probe + cache miss stub + `X-Trickplay-Status` header) | `Api/IframeHlsController.cs` |
 | Dashboard HTTP API | `Api/IframeAdminController.cs` |
 | Playback-triggered warmup (configurable defer) | `Hls/PlaybackWarmupService.cs` |
+| Library-scan-add listener (opt-in) | `Hls/LibraryAddListener.cs` |
 | Boot-time recovery of interrupted encodes | `Hls/StartupResumeService.cs` |
 | Daily pre-generate task | `Tasks/PreGenerateIframeAssetsTask.cs` |
 | Daily prune task (4 phases) | `Tasks/PruneTrickplayCacheTask.cs` |

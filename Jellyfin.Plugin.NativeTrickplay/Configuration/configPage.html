@@ -697,6 +697,14 @@
                             <label class="ntp-toggle"><input id="ResumeInterruptedEncodesOnStartup" type="checkbox" /><span class="ntp-toggle-slider"></span></label>
                         </div>
 
+                        <div class="ntp-form-row toggle">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">Encode on library add</span>
+                                <span class="ntp-label-help">Queue an iframe encode every time Jellyfin's library scanner adds a new video. Off by default — a fresh import can fire thousands of events; the daily 4 AM pre-generate task already handles uncached items overnight. Turn this on if you want trickplay ready immediately as items are imported. Encodes run at Normal priority and yield to playback-triggered work.</span>
+                            </div>
+                            <label class="ntp-toggle"><input id="EncodeOnLibraryAdd" type="checkbox" /><span class="ntp-toggle-slider"></span></label>
+                        </div>
+
                         <div class="ntp-form-row">
                             <div class="ntp-label">
                                 <span class="ntp-label-name">Cache directory</span>
@@ -851,6 +859,7 @@
                 document.querySelector('#MaxConcurrentGenerations').value = cfg.MaxConcurrentGenerations;
                 document.querySelector('#WarmupDelaySeconds').value = (cfg.WarmupDelaySeconds && cfg.WarmupDelaySeconds > 0) ? cfg.WarmupDelaySeconds : 30;
                 document.querySelector('#ResumeInterruptedEncodesOnStartup').checked = cfg.ResumeInterruptedEncodesOnStartup !== false;
+                document.querySelector('#EncodeOnLibraryAdd').checked = !!cfg.EncodeOnLibraryAdd;
                 document.querySelector('#UseHardwareDecoding').checked = cfg.UseHardwareDecoding;
                 document.querySelector('#CacheDirectory').value = cfg.CacheDirectory || '';
                 document.querySelector('#PruneOrphans').checked = cfg.PruneOrphans;
@@ -874,6 +883,7 @@
                 cfg.MaxConcurrentGenerations = Math.max(1, Math.min(8, parseInt(document.querySelector('#MaxConcurrentGenerations').value, 10) || 1));
                 cfg.WarmupDelaySeconds = Math.max(5, Math.min(300, parseInt(document.querySelector('#WarmupDelaySeconds').value, 10) || 30));
                 cfg.ResumeInterruptedEncodesOnStartup = document.querySelector('#ResumeInterruptedEncodesOnStartup').checked;
+                cfg.EncodeOnLibraryAdd = document.querySelector('#EncodeOnLibraryAdd').checked;
                 cfg.UseHardwareDecoding = document.querySelector('#UseHardwareDecoding').checked;
                 cfg.CacheDirectory = (document.querySelector('#CacheDirectory').value || '').trim();
                 cfg.PruneOrphans = document.querySelector('#PruneOrphans').checked;
