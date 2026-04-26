@@ -95,7 +95,14 @@ public sealed class IframeAdminController : ControllerBase
         return new StatusResponse(
             cachedEntries.Count,
             cachedBytes,
-            libraries.OrderBy(l => l.Name).ToList());
+            libraries.OrderBy(l => l.Name).ToList(),
+            // Logical core count of the box Jellyfin is running on. The
+            // dashboard uses this to render a recommended "Concurrent
+            // encodes" value alongside the input — the admin browser may
+            // be on a different machine, so navigator.hardwareConcurrency
+            // would be wrong here. Includes hyperthreads on x86 / SMT on
+            // ARM; that's the right denominator for ffmpeg's -threads.
+            Environment.ProcessorCount);
     }
 
     /// <summary>
@@ -424,7 +431,7 @@ public sealed class IframeAdminController : ControllerBase
     }
 
     public sealed record ProgressResponse(int InflightCount, DateTime ServerUtc, IReadOnlyList<InflightState> Inflight);
-    public sealed record StatusResponse(int CachedItems, long CachedBytes, IReadOnlyList<LibraryStatus> Libraries);
+    public sealed record StatusResponse(int CachedItems, long CachedBytes, IReadOnlyList<LibraryStatus> Libraries, int CpuCores);
     public sealed record LibraryStatus(Guid Id, string Name, int TotalItems, int CachedItems);
     public sealed record ItemsResponse(int Total, int Offset, int Limit, IReadOnlyList<ItemRow> Items);
     public sealed record ItemRow(

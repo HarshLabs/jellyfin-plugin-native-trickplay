@@ -695,6 +695,7 @@
                             <div class="ntp-label">
                                 <span class="ntp-label-name">Concurrent encodes</span>
                                 <span class="ntp-label-help">How many items to encode in parallel. <code>1</code> is safest; <code>2</code>–<code>4</code> if your CPU and disk can handle it. Up to <code>16</code> on beefy boxes — practical ceiling is roughly your CPU core count divided by <em>Threads per encode</em>. Higher values can starve other Jellyfin transcodes — watch system load. <em>Requires server restart to take effect.</em></span>
+                                <span id="ntpConcurrentHint" class="ntp-label-help" style="margin-top:4px;color:#7fb3ff;"></span>
                             </div>
                             <input id="MaxConcurrentGenerations" type="number" class="ntp-input" min="1" max="16" />
                         </div>
@@ -887,6 +888,9 @@
                 // 0 is a valid value (= ffmpeg auto), so don't fall through on falsy.
                 document.querySelector('#EncodeThreadsPerJob').value =
                     (cfg.EncodeThreadsPerJob == null || cfg.EncodeThreadsPerJob < 0) ? 1 : cfg.EncodeThreadsPerJob;
+                // Render once values are populated; will re-render on every
+                // edit via the input listener below.
+                ntpRenderConcurrentHint();
                 document.querySelector('#WarmupDelaySeconds').value = (cfg.WarmupDelaySeconds && cfg.WarmupDelaySeconds > 0) ? cfg.WarmupDelaySeconds : 30;
                 document.querySelector('#ResumeInterruptedEncodesOnStartup').checked = cfg.ResumeInterruptedEncodesOnStartup !== false;
                 document.querySelector('#EncodeOnLibraryAdd').checked = !!cfg.EncodeOnLibraryAdd;
@@ -904,6 +908,10 @@
         document.querySelector('#NativeTrickplayConfigPage').addEventListener('pagehide', function () {
             ntpStopProgressPolling();
         });
+        // Re-render the recommended-concurrency hint live as the user edits
+        // Threads per encode — saves them having to save + reload to see how
+        // the math shifts.
+        document.querySelector('#EncodeThreadsPerJob').addEventListener('input', ntpRenderConcurrentHint);
         document.querySelector('#ntpSaveBtn').addEventListener('click', function () {
             ApiClient.getPluginConfiguration(pluginId).then(function (cfg) {
                 cfg.Enabled = document.querySelector('#Enabled').checked;
@@ -1181,9 +1189,58 @@
         // can compute its label without an extra fetch.
         var ntpLastStatus = null;
 
+        // Detected CPU core count from the server (Environment.ProcessorCount).
+        // Cached at first /Status fetch so the recommendation hint can re-render
+        // reactively without a round-trip when the user adjusts Threads per
+        // encode. The admin browser may be on a different machine than the
+        // Jellyfin server, so navigator.hardwareConcurrency would be wrong.
+        var ntpCpuCores = null;
+
+        // Render the "Recommended: N" hint under the Concurrent encodes input.
+        // Formula: floor(cores / threads) - 1, leaving one core's worth of
+        // headroom for OS work and other Jellyfin transcodes (playback). When
+        // Threads per encode is 0 (ffmpeg auto), recommend 1 — auto-threading
+        // means a single job already saturates all cores. Capped at the UI's
+        // 1-16 range.
+        function ntpRenderConcurrentHint() {
+            var hintEl = document.querySelector('#ntpConcurrentHint');
+            if (!hintEl) return;
+            if (ntpCpuCores == null) { hintEl.textContent = ''; return; }
+            var threads = parseInt(document.querySelector('#EncodeThreadsPerJob').value, 10);
+            if (isNaN(threads) || threads < 0) threads = 1;
+
+            // Special case: ffmpeg auto-threads (threads=0) means a single
+            // ffmpeg already uses every core. Recommending more concurrency
+            // would oversubscribe — the only sane value is 1.
+            if (threads === 0) {
+                hintEl.textContent = 'Detected ' + ntpCpuCores + ' CPU cores · recommended ≈ 1'
+                    + ' (with Threads per encode = 0, ffmpeg auto-uses all cores per job — more concurrency would oversubscribe)';
+                return;
+            }
+
+            // Math result: leave one core's worth of headroom for OS / playback
+            // transcodes / Jellyfin overhead. Display alongside the UI cap (16)
+            // when they differ, so the user can see they have headroom to raise
+            // the cap manually via XML config if they really need to.
+            var raw = Math.max(1, Math.floor(ntpCpuCores / threads) - 1);
+            var capped = Math.min(16, raw);
+            var math = ntpCpuCores + ' ÷ ' + threads + ' threads − 1 for OS/playback headroom';
+            if (raw > capped) {
+                hintEl.textContent = 'Detected ' + ntpCpuCores + ' CPU cores · recommended ≈ ' + capped
+                    + ' (' + math + ' = ' + raw + ', clamped to UI max ' + capped + '; raise via XML config if you really need more)';
+            } else {
+                hintEl.textContent = 'Detected ' + ntpCpuCores + ' CPU cores · recommended ≈ ' + capped
+                    + ' (' + math + ')';
+            }
+        }
+
         function ntpRefreshStatus() {
             return ntpFetch('Status').then(function (s) {
                 ntpLastStatus = s;
+                if (typeof s.CpuCores === 'number' && s.CpuCores > 0) {
+                    ntpCpuCores = s.CpuCores;
+                    ntpRenderConcurrentHint();
+                }
                 var libsTotal = s.Libraries.reduce(function (acc, l) { return acc + l.TotalItems; }, 0);
                 document.querySelector('#ntpStatusMeta').textContent =
                     s.CachedItems + ' of ' + libsTotal + ' items cached · ' + ntpFmtBytes(s.CachedBytes) + ' on disk';
