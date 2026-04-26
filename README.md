@@ -34,30 +34,47 @@ Download the latest `*.zip` from [Releases](../../releases), extract into
 
 After install: **Dashboard → Plugins → Native Trickplay**
 
-- **Generation:** thumbnail width (default 480px), CRF (quality, default 30)
+- **Generation:** thumbnail height (default 320 px), interval seconds
+  (default 1), CRF (default 32), x264 preset (default ultrafast),
+  concurrent encodes (default 1, max 8), warmup delay seconds (default
+  30, range 5–300), use hardware decoding (follows Jellyfin's global
+  hwaccel setting)
 - **Cache pruning:** orphan removal (default on), age-based eviction
-  (default 90 days, 0 to disable), LRU size cap (default disabled)
+  (default 90 days, `0` to disable), LRU size cap (`0` = disabled)
+- **Auto-resume interrupted encodes** (default on)
 
-The pruner runs daily at 3 AM by default. You can run it on demand from
-**Dashboard → Scheduled Tasks → Native Trickplay → Prune Native Trickplay
-Cache → ▶**.
+The pruner runs daily at 3 AM, the pre-generate task at 4 AM. Both are
+adjustable in **Dashboard → Scheduled Tasks**. Run on demand from the
+same page.
 
-## How it works
+## How it works (short version)
 
-1. **Asset generator** — first time any item is scrubbed, ffmpeg pulls
-   keyframes from the source (`-skip_frame nokey`), encodes them as 480p
-   H.264 Main 3.0 fMP4 with one fragment per frame, caches to disk under
-   `<jellyfin-cache>/native-trickplay/<itemId>/`.
-2. **Box scanner** — a tiny C# walker computes byte offsets per fragment so
-   the playlist's `#EXT-X-BYTERANGE` lines are correct. (FFmpeg's HLS
-   muxer's `iframes_only` flag only adds the tag — it doesn't compute
-   correct byte ranges. Don't be misled.)
-3. **HLS playlist injector** — an MVC result filter intercepts both
-   `master.m3u8` and `main.m3u8` responses. Master playlists get an
-   `#EXT-X-I-FRAME-STREAM-INF` line appended. Media playlists (which
-   Jellyfin returns for `main.m3u8`) get wrapped in a synthetic master that
-   references the inner media playlist (with `?...&skipIframeInjection=1`
-   to avoid recursion) plus the I-frame variant. AVPlayer is none the wiser.
+1. **Encoder** — for each item, one ffmpeg invocation: hardware decode
+   (videotoolbox / qsv / vaapi / cuda / d3d11va / drm / rkmpp,
+   auto-fallback to software on failure) → `fps=N` thinning → HDR→SDR
+   tonemap (Hable, only for HDR sources) → 4:2:0 8-bit downscale →
+   libx264 all-IDR Main Level 4.0 (`avc1.4d0028`) → fragmented MP4.
+   One I-frame per `IframeIntervalSeconds` of source. Cached under
+   `<jellyfin-cache>/native-trickplay/<itemId>/` as `iframe.m4s` +
+   `iframe.m3u8` + `.source-mtime` stamp.
+2. **HLS injection** — an MVC result filter intercepts `master.m3u8`
+   (appends a single `#EXT-X-I-FRAME-STREAM-INF` line) and `main.m3u8`
+   (wraps the response as a synthetic master for SDR; passes through
+   for HDR/DV so the client can build its own DV-aware master).
+3. **Cache-state header** — `iframe.m3u8` responses carry
+   `X-Trickplay-Status: ready|encoding`. HDR-aware clients HEAD-probe
+   it before declaring the I-frame variant in their synthetic master,
+   avoiding tvOS 26's `kCMHTTPLiveStreamingMissingMandatoryKey` (-12642)
+   on cold caches.
+4. **Triggers** — playback start (deferred warmup), dashboard
+   Generate/Regenerate, daily 4 AM pre-gen task, startup auto-resume of
+   interrupted encodes. Priority queue: playback High, admin/pre-gen
+   Normal, startup-resume Normal — playback always leapfrogs background
+   work.
+
+For the deep dive (every trigger, the priority queue, all the failure
+modes, all the configuration knobs), read
+[`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md).
 
 ## Compatibility
 

@@ -4,11 +4,12 @@ A complete guide to the cache, the encoder pipeline, and every trigger that
 moves an item from "uncached" to "cached" — so you can predict what the
 plugin will do before you click anything.
 
-> **TL;DR** — Each video item gets one ffmpeg encode (one-time cost, ~1–6 min
-> depending on resolution/codec) that produces a small `iframe.m4s` +
-> `iframe.m3u8` pair. Once cached, scrubbing on Apple TV is instant forever.
-> The plugin self-heals from interruptions, deduplicates concurrent requests,
-> and survives Jellyfin restarts cleanly.
+> **TL;DR** — Each video item gets one ffmpeg encode (one-time cost; ~1–6
+> minutes depending on resolution/codec) that produces a small `iframe.m4s`
+> + `iframe.m3u8` pair. Once cached, scrubbing on Apple TV is instant
+> forever. The plugin self-heals from interruptions, deduplicates concurrent
+> requests, prioritizes user-triggered work over background work, and
+> survives Jellyfin restarts cleanly.
 
 ---
 
@@ -24,279 +25,285 @@ Each item gets a directory under the cache root:
 ```
 
 A cache entry is **valid** if and only if all three files exist AND the
-`.source-mtime` stamp's ticks match the source video file's current mtime AND
-the encoder tag matches the version this build produces. Anything else — file
-missing, source modified, encoder upgraded — the entry is invalid and gets
-re-encoded the next time it's needed.
+`.source-mtime` ticks match the source video's current mtime AND the
+encoder tag matches the version this build produces. Anything else — file
+missing, source modified, encoder upgraded — and the entry is invalid;
+it gets re-encoded the next time something requests it.
 
-The cache root is whatever you set in **Cache directory** (Generation card on
-the dashboard). Empty = Jellyfin's default cache path
-(`~/.local/share/jellyfin/cache/native-trickplay/` on Linux, similar locations
-on macOS/Windows).
-
-The full Cache Status panel (top of the dashboard) and the per-library
-coverage bars are computed by walking this directory.
+The cache root is whatever you set in **Cache directory** (Generation card
+on the dashboard). Empty = Jellyfin's default cache path
+(`~/.local/share/jellyfin/cache/native-trickplay/` on Linux, similar on
+macOS/Windows).
 
 ---
 
-## 2. What gets encoded — the pipeline
+## 2. Two ffmpegs, side by side
 
-For every item, ONE ffmpeg invocation produces all the trickplay frames at
-once. The pipeline:
+It's easy to confuse them. **Don't.**
+
+| | Jellyfin's playback ffmpeg | Plugin's iframe encoder |
+|---|---|---|
+| Owned by | Jellyfin core | This plugin |
+| Triggered by | AVPlayer fetching `main.m3u8` | `PlaybackWarmupService`, dashboard, etc. |
+| What it does | Stream-copy or transcode source → fMP4 segments → AVPlayer | Decode source, tonemap (if HDR), downscale, all-IDR encode → cached `iframe.m4s` |
+| Hits source video | Yes | Yes (read-only, separate handle) |
+| Affects playback | Is playback | Never |
+
+Both processes can read the same source file simultaneously without
+interference. The plugin's encoder writes only to its own cache directory.
+
+---
+
+## 3. The plugin encoder pipeline
+
+For every item the plugin encodes, ONE ffmpeg invocation runs:
 
 ```
 source video (mkv/mp4/mov/...)
     │
     ▼
-ffmpeg input  ─[hwaccel videotoolbox / qsv / vaapi / cuda / d3d11va]─►
+  DECODE  ── -hwaccel videotoolbox / qsv / vaapi / cuda / d3d11va / drm / rkmpp ──►  (HARDWARE)
+    │       (videotoolbox auto-transfers frames to system memory; QSV / VAAPI /
+    │        CUDA / D3D11VA need an explicit `hwdownload,format=<sw_format>`
+    │        prefix where <sw_format> is nv12 for 8-bit sources, p010le for
+    │        10-bit — chosen by an ffprobe pass on stream metadata)
+    ▼
+  fps=N            (N = 1 / IframeIntervalSeconds — uniform thumbnail density
+    │              regardless of the source's GOP layout)
+    ▼
+  zscale + Hable tonemap     (HDR sources only: BT.2020 PQ → BT.709 SDR via
+    │                         linear-light intermediate; AVPlayer rejects
+    │                         iframe variants whose VUI claims HDR)
+    ▼
+  scale=-2:<height>, format=yuv420p     (resize to your IframeWidth setting,
+    │                                    8-bit chroma-subsampled output)
+    ▼
+  ENCODE  ── libx264 -preset <preset> -crf <crf>                                 (CPU)
+    │       -profile:v main -level:v 4.0
+    │       -x264-params keyint=1:scenecut=0:open-gop=0:colorprim=bt709:...
+    │
+    │       Always CPU. Hardware H.264 encoders silently drop or break on
+    │       keyint=1, but the iframe variant requires every frame to be IDR.
+    │       libx264 is the only encoder that honors all-IDR cleanly and
+    │       produces a bitstream whose VUI matches the declared `avc1.4d0028`
+    │       Main 4.0 codec string AVPlayer expects.
+    ▼
+  fragmented MP4   (-movflags +frag_keyframe+empty_moov+default_base_moof)
+    │              one moof+mdat fragment per I-frame so the playlist can
+    │              address each frame with EXT-X-BYTERANGE
+    ▼
+  iframe.m4s.tmp on disk
     │
     ▼
-fps=N filter  (N = 1 / IframeIntervalSeconds)
-    │  thins frames to one per N seconds of source — this is what
-    │  guarantees uniform thumbnail density regardless of the source's
-    │  GOP layout
-    ▼
-zscale + Hable tonemap  (HDR sources only)
-    │  BT.2020 PQ → BT.709 SDR for a clean H.264 output bitstream
-    │  whose VUI tags AVPlayer accepts
-    ▼
-scale=-2:<height>, format=yuv420p
-    │  resize to your configured Thumbnail height, 4:2:0 8-bit
-    ▼
-libx264 -profile:v main -level:v 4.0
-        -x264-params keyint=1:scenecut=0:open-gop=0:colorprim=bt709:...
-    │  every frame becomes an IDR — no inter-prediction, no GOPs
-    ▼
-fragmented MP4  (-movflags +frag_keyframe+empty_moov+default_base_moof)
-    │  one moof+mdat fragment per I-frame so the playlist can address
-    │  each frame with EXT-X-BYTERANGE
-    ▼
-iframe.m4s.tmp on disk
+  Mp4BoxScanner walks the file → records (offset, size) for every fragment
     │
     ▼
-plugin's box scanner walks the file, builds iframe.m3u8 with byte ranges
+  ProbePtsDeltasAsync (ffprobe pass) → per-frame durations for #EXTINF
     │
     ▼
-File.Move(iframe.m4s.tmp → iframe.m4s)  +  write .source-mtime stamp
-                       (atomic — until both succeed, the cache is "incomplete")
+  BuildPlaylist → atomic File.Move(.tmp → final) → write .source-mtime stamp
+                  (until both succeed, the cache is "incomplete" and
+                   StartupResumeService will re-queue the item on next boot)
 ```
 
-The output is always **SDR H.264 Main Level 4.0** even for HDR sources. Apple's
-HLS Authoring Spec §6.16 mandates SDR trick play streams; AVPlayer silently
-rejects HDR-only I-frame variants. The Hable tonemap converts HDR colors
-correctly so the thumbnails don't look washed out.
-
-Codec strings on the wire match the bitstream exactly:
-- `avc1.4d0028` — H.264 Main Level 4.0, no constraint flags
-- VIDEO-RANGE=SDR
-- RESOLUTION computed from your IframeWidth × source aspect ratio
+Output is **always SDR H.264 Main Level 4.0** (`avc1.4d0028`,
+`VIDEO-RANGE=SDR`) per Apple HLS Authoring Spec §6.16. RESOLUTION is
+computed from your IframeWidth × source aspect ratio.
 
 ---
 
-## 3. Every trigger that produces a cache entry
+## 4. Every trigger that produces a cache entry
 
-There are **six** places an encode can start. They all converge on the same
-`IframeAssetCache.GetOrCreateAsync(itemId)` method, so they share the
-de-duplication and concurrency machinery.
+There are six places an encode can start. They all funnel through
+`IframeAssetCache.GetOrCreateAsync(itemId, isPriority)`, which shares one
+de-duplication map and one priority-aware slot manager — so concurrent
+requests for the same item run only once, and high-priority requests
+leapfrog background work.
 
-### 3.1 — User starts playback (deferred 30s)
+### 4.1 — User starts playback (deferred, configurable)
 
-**Trigger:** Jellyfin's `ISessionManager.PlaybackStart` event fires.
+**Trigger:** `ISessionManager.PlaybackStart` event.
+**Service:** `PlaybackWarmupService`
 
-**Service:** `PlaybackWarmupService` (hosted service)
+1. Event fires when a client reports playback start.
+2. The service waits **`WarmupDelaySeconds`** (default 30, range 5–300, set
+   on the dashboard) before doing anything. The defer prevents the heavy
+   decode+tonemap encoder from racing Jellyfin's main playback ffmpeg
+   startup window — observed empirically on macOS/videotoolbox to
+   sometimes inhibit Jellyfin's TranscodeManager from firing if the
+   plugin's ffmpeg starts in the same ~1 s as the playback ffmpeg's
+   probe phase.
+3. After the delay, re-checks the cache. Already valid → skip.
+4. Otherwise, calls `_cache.Warmup(itemId, isPriority: true)` which
+   queues an encode at **High** priority.
 
-**Flow:**
-1. Event fires when a client starts playing an item.
-2. The service waits **30 seconds** before doing anything. This delay exists
-   so the heavy iframe encoder doesn't race Jellyfin's stream-copy ffmpeg
-   startup for the first segment — racing the two ffmpegs caused intermittent
-   client-side `-1008 resource unavailable` errors on uncached HDR titles.
-3. After the delay, the service checks if the cache is already valid for the
-   item. If yes — skip entirely (no work).
-4. If not, calls `_cache.Warmup(itemId)` which queues an encode.
+> The 30 s default is conservative. On Apple Silicon / NVMe, 10–15 s is
+> safe and gives faster queue feedback. Slow disks / NAS deployments
+> should keep 30 s.
 
-**Why this matters:** by the time you reach for the scrubber on the Apple TV
-(typically 30s+ into watching), the cache is either already there or being
-built. The first segment of the actual video plays without competing for
-encoder resources.
+### 4.2 — Dashboard Generate buttons
 
-### 3.2 — User clicks Generate / Generate selected / Generate all in library
-
-**Trigger:** `POST /Plugins/NativeTrickplay/Generate` or `/GenerateLibrary`
-endpoints, fired from the dashboard.
-
+**Trigger:** `POST /Plugins/NativeTrickplay/Generate` or `/GenerateLibrary`.
 **Service:** `IframeAdminController`
 
-**Flow:**
-1. Per-row Generate button, or "Generate selected" with the row checkboxes,
-   or "Generate all in library" with the dropdown — all hit a controller
-   endpoint with a list of item IDs.
-2. The controller calls `_cache.Warmup(itemId)` for each ID immediately
-   (no 30s delay — the user explicitly asked for this).
-3. Toast confirms: "N items queued for generation."
-4. Optimistic UI: row badges flip to ⏸ queued, the shimmer bar starts, the
-   row's checkbox locks. When ffmpeg actually starts on each one, the badge
-   transitions to ▶ encoding (pulsing blue) and the meta line under it shows
-   live `XX MiB · Ym Zs` ticking up.
+Per-row Generate, "Generate selected", or "Generate all in library" all
+hit a controller endpoint with a list of item IDs and call
+`_cache.Warmup(id, isPriority: false)` immediately. **No 30 s defer**
+(the user explicitly asked for this) and **Normal** priority (will yield
+to playback-triggered High encodes).
 
-**Idempotency:** if you click Generate on an item that's already cached,
-TryGetCached hits in `< 1 ms` and the warmup is a no-op. If you click on an
-item that's already in flight, the in-flight Lazy task is reused — no
-duplicate ffmpeg.
+Optimistic UI: row badges flip to ⏸ queued, the shimmer bar starts. When
+ffmpeg starts running on each one, the badge transitions to
+`▶ encoding · NN%` (live) and the meta line shows `XX MiB · Ym Zs`
+ticking up.
 
-### 3.3 — User scrubs an uncached item before warmup completes
+### 4.3 — User scrubs an uncached item before warmup completes
 
-**Trigger:** AVPlayer fetches `iframe.m3u8` for an item that has no valid
-cache yet.
-
+**Trigger:** AVPlayer fetches `iframe.m3u8` for an item that's not cached.
 **Service:** `IframeHlsController`
 
-**Flow:**
 1. AVPlayer parses the master playlist, sees the I-FRAME-STREAM-INF, and
    fetches `/Videos/{id}/iframe.m3u8`.
-2. Controller calls `TryGetCached(id)` — returns null because the cache
-   isn't ready yet.
-3. Controller calls `_cache.Warmup(id)` (synchronous — kicks the encode if
-   not already in flight) and returns **HTTP 503 + Retry-After: 15**.
-4. AVPlayer politely waits 15 seconds and retries.
-5. When the encode completes, the cache is populated and the next retry
-   gets HTTP 200 with the playlist. AVPlayer then begins fetching the
-   `iframe.m4s` byte ranges normally.
+2. Cache miss. Controller returns **HTTP 200 + an empty I-frames-only
+   playlist** (`#EXT-X-I-FRAMES-ONLY` + `#EXT-X-ENDLIST`, zero segments)
+   with response header `X-Trickplay-Status: encoding`. AVPlayer parses
+   it, sees zero segments, marks the variant unusable for this session,
+   and proceeds with primary playback unaffected.
+3. The controller does **not** itself trigger Warmup — that path
+   races Jellyfin's main playback ffmpeg startup. Warmup is left to
+   `PlaybackWarmupService` which is already scheduled with the
+   configurable defer.
 
-**Why 503 + Retry-After:** AVPlayer would otherwise time out after ~30s and
-mark the I-frame variant permanently broken for the playback session. The
-503 keeps it polling indefinitely. The encode itself uses
-`IHostApplicationLifetime.ApplicationStopping` for its cancellation token,
-NOT the HTTP request's token — so AVPlayer disconnecting doesn't kill ffmpeg.
+> Why not 503 + Retry-After (older versions)? AVPlayer treats 503 on a
+> variant playlist referenced by the master as "wait until ready",
+> stalling primary playback for the full encode duration (~6 min on a 4K
+> HDR title). Why not 404? AVPlayer's tvOS 26 `SUPPLEMENTAL-CODECS`
+> validator (used by HDR/DV synthetic masters) is strict and rejects
+> 404 with `kCMHTTPLiveStreamingMissingMandatoryKey` (-12642), aborting
+> the master parse entirely. The empty-stub + `X-Trickplay-Status`
+> header design is the only response shape that works for both SDR
+> (server-side wrap) and HDR (client-side wrap) paths.
 
-### 3.4 — Pre-generate scheduled task (4 AM daily by default)
+### 4.4 — Cache hit (the fast path you'll hit most often)
 
-**Trigger:** The scheduled task fires at 4 AM (configurable in
-Dashboard → Scheduled Tasks → Pre-generate Native Trickplay I-frames).
+If `iframe.m3u8` is requested and the cache is valid, the controller
+returns the cached playlist with `X-Trickplay-Status: ready`. AVPlayer
+fetches `iframe.m4s` byte ranges and trickplay just works. ~1 ms server
+overhead.
 
+HDR-aware clients (e.g., JellyseerTV) HEAD-probe iframe.m3u8 before
+building their synthetic master and only declare the I-frame variant
+when the probe returns `X-Trickplay-Status: ready`. Cold cache → no
+declaration → primary playback isn't affected, encode still runs in the
+background, next session gets trickplay.
+
+### 4.5 — Pre-generate scheduled task (4 AM daily by default)
+
+**Trigger:** Daily timer.
 **Service:** `PreGenerateIframeAssetsTask`
 
-**Flow:**
-1. Task enumerates every video item in the library
+1. Enumerates every video item in the library
    (`Movie`, `Episode`, `MusicVideo`, `Video`).
-2. For each, calls `TryGetCached(id)` — if cached, count as "already done"
-   and move on.
-3. If not cached, calls `_cache.GetOrCreateAsync(id).WaitAsync(ct)` — runs
-   the encode synchronously, one item at a time (respecting the global
-   concurrency semaphore so multiple encodes can run in parallel if you
-   raised that setting).
-4. Logs final tally: `pre-gen done: N/M processed, X encoded, Y already-cached, Z failed`.
+2. Skips items already cached (`TryGetCached` < 1 ms each).
+3. For uncached items, calls `_cache.GetOrCreateAsync(id)` synchronously
+   at **Normal** priority — the global slot manager controls how many
+   ffmpegs run at once.
+4. Logs final tally:
+   `pre-gen done: N/M processed, X encoded, Y already-cached, Z failed`.
 
-**Why this exists:** for a fresh library, hitting Play and waiting through
-a 503 polling loop on every uncached item would be annoying. Running this
-once overnight makes every subsequent first-scrub instant.
+Run this once on a fresh library to skip the per-item cold-cache wait
+on first scrub.
 
-### 3.5 — Plugin startup auto-resume (30s after Jellyfin boot)
+### 4.6 — Plugin startup auto-resume (30 s after Jellyfin boot)
 
 **Trigger:** Plugin loads after a Jellyfin restart.
-
 **Service:** `StartupResumeService`
 
-**Flow:**
-1. Service starts, waits **30 seconds** so Jellyfin's own boot work and
-   any active playback's segment ffmpeg get a head start.
-2. Walks the cache root looking for directories that contain
-   `iframe.m4s.tmp` (a half-written encoder output) but where either
-   `iframe.m4s` or `.source-mtime` is missing.
-3. For each match, verifies the corresponding library item still exists
-   (skips items that have been deleted — those are the pruner's job).
-4. Calls `_cache.Warmup(itemId)` to re-queue the encode.
+1. Waits 30 s so Jellyfin's own boot work and any active playback's
+   segment ffmpeg get a head start.
+2. Walks the cache root for directories containing `iframe.m4s.tmp` but
+   missing either `iframe.m4s` or `.source-mtime` — signs of an encode
+   that didn't complete.
+3. Verifies the item still exists in the library; if not, leaves the
+   orphan dir for the pruner.
+4. Calls `_cache.Warmup(itemId, isPriority: false)` to re-queue.
 
-**What this catches:**
-- Plugin upgrades (the user clicks Update + Restart while encodes are running)
-- Jellyfin crashes (OOM, kernel panic)
-- Power failures
-- `kill -9` / forceful service stops
+Catches: plugin upgrades, Jellyfin crashes (OOM, panic), power failures,
+`kill -9`. Toggle on Generation card → **Resume interrupted encodes**
+(default on).
 
-The killed ffmpeg leaves its `.tmp` file behind. On next boot, this service
-finds the trail and re-runs the encode. Without it, the user would need to
-play each affected item manually.
+### 4.7 — Stale-encoder cleanup (prune phase 0)
 
-**Toggle:** Generation card → **Resume interrupted encodes** (default on).
-Disable if you'd rather restart Jellyfin to abort a runaway bulk encode.
-
-### 3.6 — Stale-encoder cleanup (prune phase 0)
-
-**Trigger:** The prune scheduled task at 3 AM, OR the encoder tag in
-`IframeFormat.cs` was bumped in a plugin upgrade (which makes every
-existing cache stale).
-
-**Service:** `PruneTrickplayCacheTask` (Phase 0 specifically)
-
-**Flow:** evicts cache directories whose `.source-mtime` stamp doesn't
-match the encoder tag the current build expects. After eviction, those
-items will re-encode the next time something triggers them.
-
-**This isn't an encode trigger by itself**, but it's a precondition for
-re-encodes after an upgrade. We bump the encoder tag whenever the produced
-output materially changed (e.g., we added the HDR tonemap, fixed the level
-declaration, moved to single-stream output). Bumping invalidates all old
-caches in one sweep so users don't have to manually clear anything.
+`PruneTrickplayCacheTask` Phase 0 evicts cache directories whose
+`.source-mtime` stamp doesn't match the encoder tag the current build
+expects. We bump the encoder tag whenever the produced output materially
+changes (e.g., HDR tonemap added, level declaration fixed). After
+eviction, those items will re-encode the next time something triggers
+them — usually the next pre-gen run.
 
 ---
 
-## 4. Concurrency: how multiple encodes are handled
+## 5. Concurrency: priority queue
 
 ```
-                         _inflight: ConcurrentDictionary<itemId, Lazy<Task<IframeAsset>>>
-                         (de-duplication — same item requested twice → same task)
-                                                │
-                                                ▼
-GetOrCreateAsync ─► GenerateAsync ─► await _globalLimit.WaitAsync(ct)
-                                     (semaphore sized by MaxConcurrentGenerations)
-                                                │
-                                                ▼
-                                        RunFfmpegAsync
-                                                │
-                                                ▼
-                                  ffmpeg process (with hwaccel if configured)
-                                                │
-                                                ▼
-                                        Mp4BoxScanner
-                                                │
-                                                ▼
-                                  ProbePtsDeltasAsync (ffprobe pass)
-                                                │
-                                                ▼
-                                  BuildPlaylist + atomic move + stamp write
+GetOrCreateAsync(id, isPriority)
+        │
+        ▼
+  _inflight: ConcurrentDictionary<itemId, Lazy<Task<IframeAsset>>>
+  (de-duplication — same item requested N times → ONE ffmpeg)
+        │
+        ▼
+  GenerateAsync ─► AcquireSlotAsync(priority, id, ct)
+                   │
+                   ▼
+                Slot manager (replaces a plain semaphore)
+                  • slotsAvailable counter, capped by MaxConcurrentGenerations
+                  • waitQueue: priority desc → sequence asc
+                  • PromoteToPriority(id) bumps an already-queued waiter
+                    to High in place when a playback request races a
+                    pre-gen / admin request for the same item
+                   │
+                   ▼
+                RunFfmpegAsync (with hwaccel if configured)
+                   │
+                   ▼
+                Mp4BoxScanner → ProbePtsDeltasAsync → BuildPlaylist
+                   │
+                   ▼
+                atomic File.Move + stamp write
 ```
 
-**De-duplication:** Two callers asking for the same item ID share the same
-Lazy task — only one ffmpeg runs even if 50 concurrent requests pile up.
+**Three priority levels:**
+- **High (100)** — playback-triggered (`PlaybackWarmupService`)
+- **Normal (50)** — admin Generate, pre-gen scheduled task,
+  StartupResumeService
+- **Low (10)** — reserved
 
-**Concurrency limit:** `MaxConcurrentGenerations` (Generation card,
-default `1`, max `8`). The semaphore caps how many ffmpeg processes can
-run in parallel. With `1`, a queue of 100 items processes serially. With
-`4`, four ffmpegs run at once and the rest wait their turn.
+A user clicking Play on item #150 of a 200-item bulk encode gets that
+item promoted to the front of the queue instead of waiting behind 149
+others. **Non-preemptive** — an encode that's already running stays put;
+priority only steers the next slot assignment when one frees up.
 
-> Changing `MaxConcurrentGenerations` requires a Jellyfin restart — the
-> semaphore is created at plugin load time.
+`MaxConcurrentGenerations` (Generation card, default 1, max 8) caps how
+many ffmpegs run in parallel. Changing it requires a Jellyfin restart —
+the slot count is created at plugin load.
 
-**Process lifetime:** The ffmpeg cancellation token is the application
-lifetime token, not the HTTP request token. Why this matters:
-- AVPlayer disconnecting doesn't kill the ffmpeg
-- The dashboard tab closing doesn't kill anything
-- The encoder finishes whatever it's doing right up until Jellyfin shuts down
-
-**Shutdown:** When Jellyfin stops, `ApplicationStopping` fires, the in-flight
-ffmpegs are killed (`proc.Kill(entireProcessTree: true)`), and any partial
-.tmp files survive on disk to be picked up by `StartupResumeService` on the
-next boot.
+**Process lifetime:** ffmpeg uses `IHostApplicationLifetime.ApplicationStopping`
+as its cancellation token, NOT the HTTP request token. AVPlayer
+disconnecting or the dashboard closing doesn't kill anything; only a
+Jellyfin shutdown does. Killed mid-encode → leaves a `.tmp` →
+StartupResumeService picks it up next boot.
 
 ---
 
-## 5. Hardware acceleration
+## 6. Hardware acceleration
 
-The encoder uses Jellyfin's globally-configured hardware acceleration
-(Dashboard → Playback → Transcoding → Hardware acceleration). The plugin's
-own **Use hardware decoding** toggle is a second gate on top of that.
+The encoder reads Jellyfin's global **Dashboard → Playback → Transcoding
+→ Hardware acceleration** setting and adds the right `-hwaccel` flag.
+The plugin's own **Use hardware decoding** toggle is a second gate — off
+forces software regardless.
 
-| Jellyfin setting | What the plugin adds to ffmpeg |
+| Jellyfin setting | What the plugin adds |
 |---|---|
 | videotoolbox (macOS) | `-hwaccel videotoolbox -hwaccel_flags +low_priority` |
 | qsv (Intel) | `-hwaccel qsv [-qsv_device …]` |
@@ -304,19 +311,37 @@ own **Use hardware decoding** toggle is a second gate on top of that.
 | nvenc (NVIDIA encoder) | `-hwaccel cuda -threads 1` |
 | amf on Windows | `-hwaccel d3d11va -threads 2` |
 | amf on Linux | `-hwaccel vaapi [-vaapi_device …]` |
+| v4l2m2m (Pi, etc.) | `-hwaccel drm` |
+| rkmpp (Rockchip) | `-hwaccel rkmpp` |
 | amf on macOS / unknown | software-only |
 
-**Auto-fallback:** if hwaccel decode fails with a recognized handoff error
-("Failed to transfer data to output frame", "Cannot use AVHWFramesContext",
-etc.), the plugin retries the same encode with software decode. The user
-sees a `[WRN]` line in the log; the encode still completes.
+**`hwdownload` for non-VideoToolbox hwaccels.** VideoToolbox auto-transfers
+decoded frames to system memory; the others (QSV/VAAPI/CUDA/D3D11VA)
+leave them in GPU memory in a hardware pixel format. The CPU-only `fps`
+filter at the start of the chain can't accept those, so the plugin
+prepends `hwdownload,format=<sw_format>` where `<sw_format>` is `nv12`
+for 8-bit sources and `p010le` for 10-bit. **Bit depth is probed up
+front** (`ProbeSourceVideo` runs ffprobe to read `bits_per_raw_sample`
+and `pix_fmt`); using an alternation like `nv12|p010le` does NOT work —
+ffmpeg picks the first option and errors out if it isn't in the device's
+`valid_sw_formats`. The probe also detects HDR (PQ / HLG transfer
+characteristics).
 
-The encoder side (libx264) is always CPU. Hardware H.264 encoders don't
-honor `keyint=1` reliably, and trickplay needs every frame to be IDR.
+**Auto-fallback to software decode** if the hwaccel handoff fails with a
+recognized error pattern (`Failed to transfer data to output frame`,
+`Cannot use AVHWFramesContext`, `Invalid output format … for hwframe
+download`, `Impossible to convert between the formats`, …). The plugin
+retries the same encode with `-hwaccel` removed. The user sees a `[WRN]`
+line with the tail of the ffmpeg stderr; the encode still completes.
+
+**Encoder side is always CPU (libx264).** Hardware H.264 encoders don't
+honor `keyint=1` reliably and the iframe variant requires every frame
+to be IDR. At 480p / 1 fps / CRF 30, libx264 is cheap (~2× realtime per
+encode on a Mac mini M2).
 
 ---
 
-## 6. Pruning: how the cache stays bounded
+## 7. Pruning: how the cache stays bounded
 
 `PruneTrickplayCacheTask` runs daily at 3 AM (configurable). Four phases,
 each gated independently:
@@ -327,107 +352,142 @@ each gated independently:
 2. **Phase 1 — Orphans** (`PruneOrphans`, default on): evicts cache dirs
    whose item is no longer in the Jellyfin library.
 3. **Phase 2 — Age-based** (`MaxAgeDays`, default 90, `0` disables):
-   evicts cache entries unaccessed for N days.
-4. **Phase 3 — Size cap** (`MaxCacheGigabytes`, default 0 / disabled):
+   evicts entries unaccessed for N days.
+4. **Phase 3 — Size cap** (`MaxCacheGigabytes`, default `0` / disabled):
    evicts least-recently-used entries until total size is under the cap.
 
 `TryEvict` is in-flight aware — it skips items currently being encoded
 (`_inflight` dictionary check) so eviction can never race regeneration.
+The dictionary is cleaned up on every encode return path (success,
+failure, fast-path cache hit), so an item that finished encoding earlier
+in the day is properly evictable.
 
 ---
 
-## 7. The HLS injection layer
+## 8. The HLS injection layer
 
-The plugin doesn't change Jellyfin's main video transcoding at all. It
-intercepts only two endpoints:
+Two endpoints are intercepted; everything else passes through untouched:
 
-- `GET /Videos/{id}/master.m3u8` — Jellyfin's multi-variant playlist.
+- **`GET /Videos/{id}/master.m3u8`** — Jellyfin's multi-variant playlist.
   Plugin appends a single `#EXT-X-I-FRAME-STREAM-INF` line pointing at
   `iframe.m3u8`, leaving every other variant untouched.
-- `GET /Videos/{id}/main.m3u8` — Jellyfin's single-variant playlist
-  (used for stream-copy direct-stream HDR scenarios). Plugin wraps the
-  response as a synthetic master playlist with one STREAM-INF (the
-  original media playlist) + one I-FRAME-STREAM-INF.
+- **`GET /Videos/{id}/main.m3u8`** — Jellyfin's single-variant playlist
+  (used for stream-copy direct-stream scenarios). For SDR, plugin wraps
+  the response as a synthetic master with one STREAM-INF (the original
+  media playlist) + one I-FRAME-STREAM-INF.
 
-For HDR/DV content, the server-side wrap is intentionally skipped — the
-JellySeerTV iOS client builds its own synthetic master client-side via
-`AVAssetResourceLoaderDelegate` so it can declare DV `SUPPLEMENTAL-CODECS`
-correctly. The plugin's behavior is defensive: never emit a wrong
-STREAM-INF that would break HDR playback.
+**HDR/DV is intentionally pass-through.** The JellyseerTV iOS client
+builds its own synthetic master client-side via
+`AVAssetResourceLoaderDelegate` because tvOS 26's `SUPPLEMENTAL-CODECS`
+extension requires DV codec strings the server can't reliably emit.
+That client HEAD-probes `iframe.m3u8` and conditionally includes the
+I-frame variant based on `X-Trickplay-Status: ready` — so HDR scrubbing
+thumbnails work the moment the plugin's cache is hot.
 
-The injection is via an `IAsyncResultFilter` registered globally; it
-buffers the response into a `MemoryStream`, decides what to do based on
-the body content (master vs media playlist), and writes back either
-modified or original bytes. **Pass-through is the safe default** — any
-ambiguity, the original playlist wins and trickplay just doesn't
-appear for that item.
+The injector buffers the response into a `MemoryStream`, decides what
+to do based on the body content (master vs media playlist), and writes
+back either modified or original bytes. **Pass-through is the safe
+default** — any ambiguity, the original playlist wins and trickplay
+just doesn't appear for that item.
 
 ---
 
-## 8. Reading the dashboard
+## 9. Reading the dashboard
 
-The dashboard's three live cards reflect different parts of the system:
+Three live cards reflect different parts of the system:
 
-**Cache Status** (`GET /Plugins/NativeTrickplay/Status`):
-- KPI tiles: cached items, bytes on disk, total library items, coverage %
-- Per-library breakdown with progress bars
-- Refresh button forces a re-fetch
+**Cache Status** (`GET /Plugins/NativeTrickplay/Status`) — KPI tiles
+(cached items, bytes on disk, total library items, coverage %),
+per-library breakdown with progress bars, refresh button.
 
-**Encoding in progress** (`GET /Plugins/NativeTrickplay/Progress`):
-- Polls every 2s when active, every 15s when idle
-- Shows running items first (pinned to top), then queued in submission order
-- Default view caps at 10 rows; "Show all (N)" expands to a scrollable list
-- Auto-disappears when nothing is in flight
+**Encoding in progress** (`GET /Plugins/NativeTrickplay/Progress`) —
+polls every 2 s when active, every 15 s when idle. Shows running items
+first (pinned), then queued in submission order. Each running row shows
+`▶ encoding · NN%`, elapsed time, partial output bytes, and a Progress
+column. Default cap 10 rows; "Show all (N)" expands to a scrollable
+list. Auto-disappears when nothing is in flight.
+
+> The **percent estimate** is `partial_bytes / estimated_total_bytes`,
+> where `estimated_total_bytes ≈ frames × 14.4 KB × (width / 480)²`,
+> calibrated from real encodes. Real outputs land within ~±20%; the UI
+> caps the displayed percent at 99 % so it never reads "100%" before the
+> encode actually finishes.
 
 **Find & select items** (`GET /Plugins/NativeTrickplay/Items`):
 - Tokenized search (case + accent insensitive), AND-matched across Name +
-  SeriesName. Recognized S/E forms: `S6E18`, `1x05`, `Season 6`, `Episode 18`,
-  `S7`, `E18`.
-- Live search debounced at 280ms (no Search button needed)
-- Cache filter (All / Cached / Not cached) and Sort order both live-refresh
-- Per-row Generate / Regenerate / Evict buttons
-- Bulk Generate selected / Evict selected
-- Reactive row state synced from /Progress every 2s — running items show
-  pulsing blue badge with live elapsed time and partial output bytes
+  SeriesName. Recognized S/E forms: `S6E18`, `1x05`, `Season 6`,
+  `Episode 18`, `S7`, `E18`.
+- Live search debounced at 280 ms (no Search button needed).
+- Cache filter (All / Cached / Not cached) and Sort order both
+  live-refresh.
+- Per-row Generate / Regenerate / Evict buttons.
+- Bulk Generate selected / Evict selected.
+- Reactive row state synced from /Progress every 2 s.
 
 ---
 
-## 9. What happens when …
+## 10. Configuration knobs
+
+All on the dashboard config page; values written to the standard
+Jellyfin plugin XML config.
+
+| Setting | Default | Range | Effect | Restart needed? |
+|---|---|---|---|---|
+| Enabled | true | bool | Master switch. Off = no master-playlist injection, no warmup, no encodes | No |
+| Iframe width | 320 | px | Output thumbnail height (sic — width in code, used as scale=-2:N height) | No (new encodes only) |
+| Iframe interval | 1.0 s | ≥1 | Seconds between thumbnails (1 = densest, larger = smaller cache) | No (new encodes only) |
+| Iframe CRF | 32 | 18–40 | x264 quality (lower = larger files) | No (new encodes only) |
+| Iframe preset | ultrafast | x264 preset | Encode speed/size tradeoff | No (new encodes only) |
+| Use hardware decoding | true | bool | Read Jellyfin's hwaccel setting; off forces software | No |
+| Concurrent encodes | 1 | 1–8 | Max parallel ffmpegs | **Yes** |
+| Warmup delay | 30 s | 5–300 | Seconds after PlaybackStart before encoding | No |
+| Resume interrupted encodes | true | bool | StartupResumeService toggle | No |
+| Cache directory | (empty) | path | Where iframe assets live; empty = Jellyfin default | No (new encodes only) |
+| Prune orphans | true | bool | Pruner Phase 1 | No |
+| Max age days | 90 | 0–N | Pruner Phase 2 (`0` disables) | No |
+| Max cache GB | 0 | 0–N | Pruner Phase 3 size cap (`0` disables) | No |
+
+---
+
+## 11. What happens when …
 
 | Scenario | Result |
 |---|---|
-| You upgrade the plugin | New version installs; old version keeps running until restart. On restart, ffmpeg gets killed mid-encode; .tmp files stay on disk. Auto-resume service fires 30s after boot and re-queues them. |
+| You upgrade the plugin | New version installs; old keeps running until restart. On restart, in-flight ffmpegs killed; `.tmp` files stay on disk; auto-resume re-queues them ~30 s after boot. |
 | Jellyfin crashes (OOM / panic) | Same as upgrade-restart. Auto-resume catches it. |
 | Source video file is replaced | Stamp mtime no longer matches → next access invalidates the old cache → re-encode. |
-| You change `IframeWidth` or `IframeIntervalSeconds` | Existing caches stay valid (encoder tag unchanged). New encodes use new settings. To regenerate everything at the new settings, run the Pre-generate task or evict + generate. |
+| You change `IframeWidth`, `IframeIntervalSeconds`, `IframeCrf`, `IframePreset` | Existing caches stay valid (encoder tag unchanged). New encodes use new settings. To regenerate everything, run the Pre-generate task or evict + generate. |
+| You change `WarmupDelaySeconds` | Takes effect immediately (next PlaybackStart event). |
 | You change `MaxConcurrentGenerations` | Takes effect on next plugin load (Jellyfin restart). |
-| You change `Cache directory` | Old caches at the old path are orphaned (delete manually if you want disk back). New encodes write to the new path. |
-| You disable the plugin | Existing caches are preserved on disk. Master-playlist injection stops; AVPlayer falls back to no trickplay. Re-enable to pick up where you left off. |
-| You evict an item via the dashboard | Cache directory deleted. Next access re-encodes from scratch. |
-| Source has unusual codec (AV1 in MV) | hwaccel decode fails; plugin retries with software decode and succeeds. One `[WRN]` line in the log, encode completes. |
-| Library scan adds 500 new items | They appear in /Items with `cached=false`; they're not encoded until something triggers them (next pre-gen run at 4 AM, manual Generate, or first playback). |
+| You change `Cache directory` | Old caches at the old path are orphaned (delete manually). New encodes write to the new path. |
+| You disable the plugin | Existing caches preserved on disk. Master-playlist injection stops; AVPlayer falls back to no trickplay. Re-enable to pick up where you left off. |
+| You evict an item via the dashboard | Cache directory deleted. Next access re-encodes from scratch. Eviction is in-flight aware: items currently encoding are silently skipped. |
+| Source has unusual codec or bit-depth probe is wrong | hwaccel decode fails; plugin retries with software decode and succeeds. One `[WRN]` line in the log; encode completes. |
+| Library scan adds 500 new items | They appear in /Items with `cached=false`; not encoded until something triggers them (next pre-gen run, manual Generate, or first playback). |
+| HDR client (JellyseerTV) plays an uncached HDR item | HEAD-probe sees `X-Trickplay-Status: encoding`; client omits the I-frame variant from its synthetic master; primary playback starts immediately; background encode runs; next play of the same item gets `ready` and trickplay works. |
 
 ---
 
-## 10. Where to look in the code
+## 12. Where to look in the code
 
-If you want to understand a specific behavior:
-
-| You care about | Read this file |
+| Behavior | File |
 |---|---|
-| The encoder pipeline (filter chain, codec args) | `Hls/IframeAssetCache.cs` → `BuildFfmpegArgs` |
+| Encoder pipeline (filter chain, codec args) | `Hls/IframeAssetCache.cs` → `BuildFfmpegArgs` |
+| HDR + bit-depth probe | `Hls/IframeAssetCache.cs` → `ProbeSourceVideo` |
 | Hardware acceleration mapping | `Hls/IframeAssetCache.cs` → `AppendHwaccelArgs` + `IsLikelyHwaccelFailure` |
 | Cache validation logic | `Hls/IframeAssetCache.cs` → `TryGetCached` |
-| Concurrency / dedup | `Hls/IframeAssetCache.cs` → `GetOrCreateAsync` (the `_inflight` dictionary) |
+| Concurrency / dedup / priority queue | `Hls/IframeAssetCache.cs` → `GetOrCreateAsync`, `AcquireSlotAsync`, `ReleaseSlot`, `PromoteToPriority` |
+| Inflight cleanup (fast-path + finally) | `Hls/IframeAssetCache.cs` → `GenerateAsync` |
+| Progress estimator | `Hls/IframeAssetCache.cs` → `EstimateTotalEncodedBytes` |
 | Master-playlist rewriting | `Hls/MasterPlaylistInjector.cs` → `OnResultExecutionAsync` |
-| HTTP API for the dashboard | `Api/IframeAdminController.cs` |
-| HTTP API for AVPlayer | `Api/IframeHlsController.cs` |
-| Playback-triggered warmup (with 30s defer) | `Hls/PlaybackWarmupService.cs` |
+| `iframe.m3u8` controller (HEAD probe + cache miss stub + `X-Trickplay-Status` header) | `Api/IframeHlsController.cs` |
+| Dashboard HTTP API | `Api/IframeAdminController.cs` |
+| Playback-triggered warmup (configurable defer) | `Hls/PlaybackWarmupService.cs` |
 | Boot-time recovery of interrupted encodes | `Hls/StartupResumeService.cs` |
 | Daily pre-generate task | `Tasks/PreGenerateIframeAssetsTask.cs` |
 | Daily prune task (4 phases) | `Tasks/PruneTrickplayCacheTask.cs` |
-| All the configurable knobs | `Plugin.cs` → `PluginConfiguration` |
+| All configuration knobs | `Plugin.cs` → `PluginConfiguration` |
 
-The dashboard HTML lives in `Configuration/configPage.html` — single file
-with all CSS and JS inline. Everything is scoped under
+The dashboard HTML lives in `Configuration/configPage.html` — single
+file with all CSS and JS inline. Everything is scoped under
 `#NativeTrickplayConfigPage` so it never leaks into the rest of Jellyfin.
