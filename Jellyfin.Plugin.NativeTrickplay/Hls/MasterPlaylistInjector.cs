@@ -255,6 +255,27 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
     {
         output = string.Empty;
 
+        // Browser-based clients (Jellyfin Web UI via HLS.js, embedded webviews
+        // on mobile apps) request /main.m3u8 expecting a *media* playlist
+        // with #EXTINF segment lines. Wrapping it as a synthetic master
+        // playlist breaks HLS.js's MediaSource Extensions setup — the
+        // player sees STREAM-INF instead of EXTINF, has to chase the inner
+        // variant URL, and ends up with broken codec negotiation / stalled
+        // playback. Browsers don't use HLS I-frame trickplay variants
+        // anyway (they have their own scrubbing UI), so passing through
+        // unchanged is both correct and lossless.
+        // The wrap is for Apple TV / AVPlayer-based clients (UA contains
+        // "AppleCoreMedia" or similar) which fetch /main.m3u8 directly and
+        // need the I-frame variant discoverable for native trickplay.
+        var ua = req.Headers.UserAgent.ToString();
+        if (!string.IsNullOrEmpty(ua) && ua.Contains("Mozilla", StringComparison.Ordinal))
+        {
+            _logger.LogDebug(
+                "[NativeTrickplay] TryWrapAsMaster: skipping browser client for {ItemId} (UA contains Mozilla — web UI / HLS.js doesn't need synthetic master)",
+                itemId);
+            return false;
+        }
+
         var item = _libraryManager.GetItemById(itemId);
         if (item is null)
         {
