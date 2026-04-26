@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -11,21 +12,39 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Filters;
-using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.NativeTrickplay.Hls;
 
 /// <summary>
-/// Buffers responses from /Videos/{id}/master.m3u8 and /Videos/{id}/main.m3u8.
-/// - master playlist: appends an EXT-X-I-FRAME-STREAM-INF line.
-/// - main (media) playlist: replaces the body with a synthetic master that
-///   references the original media playlist (with skipIframeInjection=1 to
-///   avoid recursion) plus our I-frame variant. CRITICAL: the synthetic
-///   STREAM-INF must include accurate CODECS, RESOLUTION, FRAME-RATE, and
-///   VIDEO-RANGE derived from the actual MediaStream — otherwise AVPlayer
-///   refuses to play HDR content because the declared codec capability
-///   doesn't match the real bitstream.
+/// Buffers HLS playlist responses for /Videos/{id}/master.m3u8 and
+/// /Videos/{id}/main.m3u8 and injects an I-frame trickplay variant
+/// based on which path the client took.
+///
+/// Two distinct client flows both need to work:
+///
+/// 1. <b>Standard transcode flow</b> (e.g. Apple TV via JellyseerTV when
+///    the file requires full transcoding): client uses Jellyfin's
+///    `TranscodingUrl` = master.m3u8. We append #EXT-X-I-FRAME-STREAM-INF
+///    and AVPlayer follows the standard master → primary variant chain.
+///    The main.m3u8 fetch that follows must <b>pass through unchanged</b>
+///    — wrapping it as a synthetic master here causes AVPlayer to chase
+///    a layered master/master/media chain and stalls primary playback on
+///    slow transcodes (observed end-to-end: 0.0s buffered forever for
+///    HEVC 10-bit hev1 forced transcodes).
+///
+/// 2. <b>Direct-stream / client-built URL flow</b> (e.g. JellyseerTV's
+///    "manually constructed HLS URL" for mkv direct-stream): client
+///    bypasses master.m3u8 entirely and points AVPlayer at /main.m3u8
+///    directly. We never get a chance to add the I-frame variant via
+///    master injection. To deliver trickplay here we must <b>wrap the
+///    main.m3u8 response as a synthetic master</b> that lists the
+///    original media playlist as primary plus our I-frame variant.
+///
+/// Telling the two apart: track PlaySessionIds that fetched master.m3u8.
+/// On a later main.m3u8 fetch with the same session, the client already
+/// saw our injection in the master — pass through. Without a prior
+/// master fetch, the client built its own URL — wrap.
 /// </summary>
 public sealed class MasterPlaylistInjector : IAsyncResultFilter
 {
@@ -37,6 +56,21 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
     // at typical IframeWidth (320–720) without violating the "measured peak <
     // 110% of BANDWIDTH" tolerance from the spec.
     private const long IframeBandwidth = 1_000_000;
+
+    // Track PlaySessionIds whose master.m3u8 we've already augmented with
+    // the I-frame variant. If a later main.m3u8 fetch comes in for the
+    // same session, AVPlayer already knows about trickplay — don't wrap
+    // (wrapping a media playlist as a synthetic master breaks primary
+    // playback on slow transcodes). Sessions absent from this set came
+    // from clients that built their own URL pointing directly at main.m3u8;
+    // for those we must wrap so trickplay is discoverable.
+    private static readonly ConcurrentDictionary<string, DateTime> MasterSeenSessions = new();
+    private static readonly TimeSpan MasterSeenTtl = TimeSpan.FromMinutes(30);
+    // Lazy cleanup interval — prune stale entries at most once per minute
+    // when an injector call comes in. Keeps the dict bounded without a
+    // dedicated background timer.
+    private static DateTime _lastSweepUtc = DateTime.MinValue;
+    private static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(1);
 
     private readonly ILibraryManager _libraryManager;
     private readonly IframeAssetCache _cache;
@@ -74,9 +108,38 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             return;
         }
 
+        // PlaySessionId distinguishes which client-side session this fetch
+        // belongs to. Used to remember whether master.m3u8 was already
+        // fetched for this session so we know whether main.m3u8 needs to
+        // be wrapped. Both PlaySessionId (Jellyfin server URL) and
+        // playSessionId (some clients construct their own URLs) are
+        // accepted — Jellyfin itself parses case-insensitively.
+        var playSessionId = http.Request.Query["PlaySessionId"].FirstOrDefault()
+            ?? http.Request.Query["playSessionId"].FirstOrDefault();
+        SweepStaleSessionsIfDue();
+
+        // For main.m3u8: decide passthrough vs wrap based on whether the
+        // master path was already taken. If we don't have a session id,
+        // err on the side of the wrap (matches pre-1.1.43 behavior for
+        // unknown clients).
+        bool wrapMain = false;
+        if (isMain)
+        {
+            if (!string.IsNullOrEmpty(playSessionId)
+                && MasterSeenSessions.ContainsKey(playSessionId))
+            {
+                _logger.LogDebug(
+                    "[NativeTrickplay] injector: main.m3u8 for {ItemId} session={Session} — master already injected, passing through",
+                    itemId, playSessionId);
+                await next().ConfigureAwait(false);
+                return;
+            }
+            wrapMain = true;
+        }
+
         _logger.LogDebug(
-            "[NativeTrickplay] injector intercepting {Path}{Query} (item={ItemId})",
-            path, http.Request.QueryString.Value, itemId);
+            "[NativeTrickplay] injector intercepting {Path}{Query} (item={ItemId}, mode={Mode})",
+            path, http.Request.QueryString.Value, itemId, isMaster ? "master-inject" : "main-wrap");
 
         var origBody = http.Response.Body;
         using var buffer = new MemoryStream();
@@ -114,7 +177,7 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             bool isMasterContent = bodyText.Contains("#EXT-X-STREAM-INF", StringComparison.Ordinal);
             bool isMediaContent = bodyText.Contains("#EXTINF", StringComparison.Ordinal);
 
-            if (isMasterContent)
+            if (isMaster && isMasterContent)
             {
                 if (bodyText.Contains(IframeMarker, StringComparison.Ordinal))
                 {
@@ -123,6 +186,9 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
                         itemId);
                     buffer.Position = 0;
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
+                    // Still record the session so a follow-up main.m3u8 fetch passes through.
+                    if (!string.IsNullOrEmpty(playSessionId))
+                        MasterSeenSessions[playSessionId] = DateTime.UtcNow;
                     return;
                 }
                 if (!TryAppendIframeVariant(bodyText, itemId, http.Request.QueryString.Value ?? string.Empty, out transformed))
@@ -134,24 +200,26 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                     return;
                 }
+                if (!string.IsNullOrEmpty(playSessionId))
+                    MasterSeenSessions[playSessionId] = DateTime.UtcNow;
                 _logger.LogInformation(
-                    "[NativeTrickplay] injector: appended I-FRAME variant to master.m3u8 for {ItemId} ({Bytes}B → {NewBytes}B)",
-                    itemId, bodyText.Length, transformed.Length);
+                    "[NativeTrickplay] injector: appended I-FRAME variant to master.m3u8 for {ItemId} session={Session} ({Bytes}B → {NewBytes}B)",
+                    itemId, playSessionId ?? "(none)", bodyText.Length, transformed.Length);
             }
-            else if (isMediaContent && isMain)
+            else if (wrapMain && isMediaContent)
             {
                 if (!TryWrapAsMaster(itemId, http.Request, out transformed))
                 {
                     _logger.LogInformation(
-                        "[NativeTrickplay] injector: NOT wrapping main.m3u8 for {ItemId} (HDR pass-through, no metadata, or already-handled client)",
+                        "[NativeTrickplay] injector: NOT wrapping main.m3u8 for {ItemId} (HDR pass-through, no metadata)",
                         itemId);
                     buffer.Position = 0;
                     await buffer.CopyToAsync(origBody, http.RequestAborted).ConfigureAwait(false);
                     return;
                 }
                 _logger.LogInformation(
-                    "[NativeTrickplay] injector: wrapped main.m3u8 as synthetic master for {ItemId} ({Bytes}B → {NewBytes}B)",
-                    itemId, bodyText.Length, transformed.Length);
+                    "[NativeTrickplay] injector: wrapped main.m3u8 as synthetic master for {ItemId} session={Session} ({Bytes}B → {NewBytes}B)",
+                    itemId, playSessionId ?? "(none)", bodyText.Length, transformed.Length);
             }
             else
             {
@@ -182,6 +250,23 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         finally
         {
             http.Response.Body = origBody;
+        }
+    }
+
+    /// <summary>
+    /// Drop session entries older than <see cref="MasterSeenTtl"/>. Called
+    /// at most once per <see cref="SweepInterval"/> to keep the dict
+    /// bounded without spawning a dedicated timer.
+    /// </summary>
+    private static void SweepStaleSessionsIfDue()
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastSweepUtc < SweepInterval) return;
+        _lastSweepUtc = now;
+        var cutoff = now - MasterSeenTtl;
+        foreach (var kv in MasterSeenSessions)
+        {
+            if (kv.Value < cutoff) MasterSeenSessions.TryRemove(kv.Key, out _);
         }
     }
 
@@ -244,37 +329,17 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
     }
 
     /// <summary>
-    /// Attempts to construct a synthetic multivariant playlist that wraps a media
-    /// playlist + our I-frame variant. Returns false if we cannot derive accurate
-    /// STREAM-INF attributes from the item's MediaStream metadata — in which case
-    /// the caller passes the original media playlist through unchanged. This is the
-    /// HDR-safety guarantee: we never emit an inaccurate STREAM-INF for HDR content
-    /// (which would cause AVPlayer to refuse playback due to codec mismatch).
+    /// Construct a synthetic multivariant playlist that wraps the original
+    /// media playlist as the primary variant + appends our I-frame variant.
+    /// Returns false when we cannot derive accurate STREAM-INF attributes
+    /// from the item's MediaStream metadata — caller passes through unchanged
+    /// in that case (HDR-safety: we never emit an inaccurate STREAM-INF for
+    /// HDR content, which would cause AVPlayer to refuse playback due to
+    /// codec mismatch).
     /// </summary>
     private bool TryWrapAsMaster(Guid itemId, HttpRequest req, out string output)
     {
         output = string.Empty;
-
-        // Browser-based clients (Jellyfin Web UI via HLS.js, embedded webviews
-        // on mobile apps) request /main.m3u8 expecting a *media* playlist
-        // with #EXTINF segment lines. Wrapping it as a synthetic master
-        // playlist breaks HLS.js's MediaSource Extensions setup — the
-        // player sees STREAM-INF instead of EXTINF, has to chase the inner
-        // variant URL, and ends up with broken codec negotiation / stalled
-        // playback. Browsers don't use HLS I-frame trickplay variants
-        // anyway (they have their own scrubbing UI), so passing through
-        // unchanged is both correct and lossless.
-        // The wrap is for Apple TV / AVPlayer-based clients (UA contains
-        // "AppleCoreMedia" or similar) which fetch /main.m3u8 directly and
-        // need the I-frame variant discoverable for native trickplay.
-        var ua = req.Headers.UserAgent.ToString();
-        if (!string.IsNullOrEmpty(ua) && ua.Contains("Mozilla", StringComparison.Ordinal))
-        {
-            _logger.LogDebug(
-                "[NativeTrickplay] TryWrapAsMaster: skipping browser client for {ItemId} (UA contains Mozilla — web UI / HLS.js doesn't need synthetic master)",
-                itemId);
-            return false;
-        }
 
         var item = _libraryManager.GetItemById(itemId);
         if (item is null)
@@ -301,13 +366,8 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         }
 
         // HDR/DV main.m3u8 fetches: pass through unchanged. HDR-aware clients
-        // (e.g. JellySeerTV's HDR-Filter) build their own synthetic master
-        // client-side that points at /main.m3u8 as its variant. If we wrap
-        // here, AVPlayer ends up parsing two layered synthetic masters and
-        // stalls waiting for a media playlist that's actually a master. Server-
-        // side trickplay for HDR content has to come through the master.m3u8
-        // path (where we just append #EXT-X-I-FRAME-STREAM-INF without
-        // restructuring), not through main.m3u8 wrapping.
+        // build their own client-side synthetic master; layering ours on top
+        // of theirs causes AVPlayer to parse two synthetic masters and stall.
         if (video.VideoRangeType is not (VideoRangeType.SDR or VideoRangeType.Unknown))
         {
             _logger.LogDebug(
