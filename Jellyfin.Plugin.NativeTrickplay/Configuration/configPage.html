@@ -1320,52 +1320,70 @@
         // ── Progress panel (polls /Progress) ──────────────────────────────
         var ntpProgressTimer = null;
         var ntpLastInflightCount = -1;
+        // Cached /Progress response so footer button clicks (Show more / Show
+        // all / Collapse) can re-render without an HTTP round-trip. The cache
+        // is at most NTP_PROGRESS_POLL_MS old, and the next poll auto-refreshes
+        // the visible state — so click-from-cache is no more stale than any
+        // other moment of looking at the panel.
+        var ntpLastProgressData = null;
         // Default visible rows in the Encoding-in-progress card. Bulk-
-        // generating a whole library can produce hundreds or thousands
-        // of in-flight items; rendering them all every 2s thrashes the
-        // browser. We always show running items + the first N queued
-        // and let the user expand to see everything.
+        // generating a whole library can produce hundreds or thousands of
+        // in-flight items; rendering them all into innerHTML every 2 s
+        // freezes the browser for seconds at a time. We start at the
+        // default count and let the user expand progressively (10 at a
+        // time) up to a hard cap that keeps DOM construction snappy.
         var ntpProgressDefaultLimit = 10;
-        var ntpProgressShowAll = false;
+        var ntpProgressStep = 10;
+        var ntpProgressMaxRows = 200;
+        var ntpProgressVisibleCount = ntpProgressDefaultLimit;
 
         function ntpPollProgress() {
             return ntpFetch('Progress').then(function (p) {
-                // Always sync table rows first — this is the live
-                // feedback loop the user sees while watching the table.
-                ntpUpdateTableFromProgress(p);
+                ntpLastProgressData = p;
+                ntpRenderProgress(p);
+            });
+        }
 
-                var box = document.querySelector('#ntpProgress');
-                var list = document.querySelector('#ntpProgressList');
-                var summary = document.querySelector('#ntpProgressSummary');
-                var footer = document.querySelector('#ntpProgressFooter');
+        function ntpRenderProgress(p) {
+            // Always sync table rows first — this is the live feedback loop
+            // the user sees while watching the items table.
+            ntpUpdateTableFromProgress(p);
 
-                if (!p.Inflight || p.Inflight.length === 0) {
-                    box.style.display = 'none';
-                    if (ntpLastInflightCount > 0) ntpRefreshStatus();
-                    ntpLastInflightCount = 0;
-                    ntpProgressShowAll = false;
-                    return;
-                }
-                ntpLastInflightCount = p.Inflight.length;
-                box.style.display = '';
+            var box = document.querySelector('#ntpProgress');
+            var list = document.querySelector('#ntpProgressList');
+            var summary = document.querySelector('#ntpProgressSummary');
+            var footer = document.querySelector('#ntpProgressFooter');
 
-                // Sort: running first (so the actively-encoding item is
-                // always visible), then queued in submission order.
-                var running = p.Inflight.filter(function (it) { return it.Status === 'running'; });
-                var queued  = p.Inflight.filter(function (it) { return it.Status !== 'running'; });
-                var sorted = running.concat(queued);
-                var total = sorted.length;
+            if (!p.Inflight || p.Inflight.length === 0) {
+                box.style.display = 'none';
+                if (ntpLastInflightCount > 0) ntpRefreshStatus();
+                ntpLastInflightCount = 0;
+                ntpProgressVisibleCount = ntpProgressDefaultLimit;
+                return;
+            }
+            ntpLastInflightCount = p.Inflight.length;
+            box.style.display = '';
 
-                // Render either the first N or the full list based on toggle
-                var visible = ntpProgressShowAll ? sorted : sorted.slice(0, ntpProgressDefaultLimit);
-                var hidden = total - visible.length;
+            // Sort: running first (so the actively-encoding item is
+            // always visible), then queued in submission order.
+            var running = p.Inflight.filter(function (it) { return it.Status === 'running'; });
+            var queued  = p.Inflight.filter(function (it) { return it.Status !== 'running'; });
+            var sorted = running.concat(queued);
+            var total = sorted.length;
 
-                summary.textContent =
-                    'Live · polled every 2s · ' +
-                    running.length + ' running · ' + queued.length + ' queued · ' + total + ' total';
+            // Visible count clamps to total (so a queue that just shrank past
+            // the user's expansion target doesn't render empty rows) and to
+            // the hard cap (so the DOM never gets unwieldy).
+            var visibleCount = Math.min(ntpProgressVisibleCount, total, ntpProgressMaxRows);
+            var visible = sorted.slice(0, visibleCount);
+            var hidden = total - visible.length;
+            var atCap = visibleCount >= ntpProgressMaxRows && total > ntpProgressMaxRows;
 
-                list.className = ntpProgressShowAll && hidden === 0 && total > ntpProgressDefaultLimit
-                    ? 'expanded' : (ntpProgressShowAll ? 'expanded' : '');
+            summary.textContent =
+                'Live · polled every 2s · ' +
+                running.length + ' running · ' + queued.length + ' queued · ' + total + ' total';
+
+            list.className = visibleCount > ntpProgressDefaultLimit ? 'expanded' : '';
 
                 list.innerHTML =
                     '<table class="ntp-table"><thead><tr>' +
@@ -1411,25 +1429,76 @@
                             '</tr>';
                     }).join('') + '</tbody></table>';
 
-                // Footer: only show toggle if there's something to expand/collapse.
-                if (total > ntpProgressDefaultLimit) {
-                    footer.innerHTML =
-                        (hidden > 0
-                            ? '<span>+ ' + hidden + ' more queued</span>'
-                            : '<span>Showing all ' + total + ' items</span>') +
-                        '<button type="button" class="ntp-mini-action" id="ntpProgressToggle">' +
-                            (ntpProgressShowAll ? 'Show fewer' : 'Show all (' + total + ')') +
-                        '</button>';
-                    var toggle = document.querySelector('#ntpProgressToggle');
-                    if (toggle) {
-                        toggle.addEventListener('click', function () {
-                            ntpProgressShowAll = !ntpProgressShowAll;
-                            ntpPollProgress();
-                        });
-                    }
+            // Footer: progressive expansion controls. Three actions:
+            //   • Show 10 more — additive expansion, disabled at cap or total
+            //   • Show all     — jump to the cap (or total if smaller)
+            //   • Collapse     — reset to default, only when expanded
+            // All click handlers re-render from the cached p (no refetch).
+            // RequestAnimationFrame defer + button text swap gives immediate
+            // visual feedback so the user knows the click registered, even
+            // when the next render does substantial DOM work.
+            if (total > ntpProgressDefaultLimit) {
+                var leftSide;
+                if (atCap) {
+                    leftSide = '+ ' + hidden + ' more queued <span style="opacity:0.55;">(display capped at ' + ntpProgressMaxRows + ' for performance)</span>';
+                } else if (hidden > 0) {
+                    leftSide = '+ ' + hidden + ' more queued';
                 } else {
-                    footer.innerHTML = '';
+                    leftSide = 'Showing all ' + total + ' items';
                 }
+
+                var canShowMore = visibleCount < total && visibleCount < ntpProgressMaxRows;
+                var canShowAll = visibleCount < Math.min(total, ntpProgressMaxRows);
+                var canCollapse = visibleCount > ntpProgressDefaultLimit;
+
+                footer.innerHTML =
+                    '<span>' + leftSide + '</span>' +
+                    '<span style="display:flex;gap:8px;">' +
+                        (canShowMore
+                            ? '<button type="button" class="ntp-mini-action" id="ntpProgressShowMore">Show ' + ntpProgressStep + ' more</button>'
+                            : '') +
+                        (canShowAll
+                            ? '<button type="button" class="ntp-mini-action" id="ntpProgressShowAll">Show all</button>'
+                            : '') +
+                        (canCollapse
+                            ? '<button type="button" class="ntp-mini-action" id="ntpProgressCollapse">Collapse</button>'
+                            : '') +
+                    '</span>';
+
+                ntpWireProgressFooterButton('#ntpProgressShowMore', function () {
+                    ntpProgressVisibleCount = Math.min(
+                        ntpProgressVisibleCount + ntpProgressStep,
+                        ntpProgressMaxRows,
+                        total);
+                });
+                ntpWireProgressFooterButton('#ntpProgressShowAll', function () {
+                    ntpProgressVisibleCount = Math.min(total, ntpProgressMaxRows);
+                });
+                ntpWireProgressFooterButton('#ntpProgressCollapse', function () {
+                    ntpProgressVisibleCount = ntpProgressDefaultLimit;
+                });
+            } else {
+                footer.innerHTML = '';
+            }
+        }
+
+        // Helper: wire a footer expand/collapse button so its click
+        // (1) immediately swaps its label to "…" for visual feedback,
+        // (2) yields one rAF cycle so that label paints,
+        // (3) then mutates the visible-count and re-renders from cache —
+        // no /Progress fetch needed, the cache is at most 2 s old.
+        function ntpWireProgressFooterButton(selector, mutate) {
+            var btn = document.querySelector(selector);
+            if (!btn) return;
+            btn.addEventListener('click', function () {
+                btn.disabled = true;
+                btn.textContent = '…';
+                requestAnimationFrame(function () {
+                    requestAnimationFrame(function () {
+                        mutate();
+                        if (ntpLastProgressData) ntpRenderProgress(ntpLastProgressData);
+                    });
+                });
             });
         }
         function ntpStartProgressPolling() {
