@@ -384,6 +384,19 @@
         max-height: 600px;
         overflow-y: auto;
     }
+    #NativeTrickplayConfigPage .ntp-selection-banner {
+        padding: 0.65em 1em;
+        margin: 0.5em 0 0.75em;
+        background: rgba(80, 140, 255, 0.08);
+        border: 1px solid rgba(80, 140, 255, 0.3);
+        border-radius: 6px;
+        font-size: 0.9em;
+    }
+    #NativeTrickplayConfigPage .ntp-selection-banner a {
+        color: #7fb3ff;
+        text-decoration: underline;
+        cursor: pointer;
+    }
     #NativeTrickplayConfigPage .ntp-progress-footer {
         display: flex;
         justify-content: space-between;
@@ -866,7 +879,19 @@
                                 <button id="ntpEvictSelectedBtn" type="button" class="ntp-btn ntp-btn-danger ntp-btn-sm">Evict selected</button>
                             </div>
                         </div>
+                        <!-- Selection banner: appears when user has either
+                             a partial selection on a paginated result set
+                             (offering "Select all N matching this filter")
+                             or has already entered all-matching mode
+                             (offering "Clear selection"). Hidden otherwise. -->
+                        <div id="ntpSelectionBanner" class="ntp-selection-banner" style="display:none;"></div>
                         <div id="ntpResults" class="ntp-results"></div>
+                        <!-- Pagination footer: appears below the results
+                             table when total > visible. Lets the admin
+                             load more results in chunks (Load more) or
+                             pull everything matching the current filter
+                             (Load all). Hidden when nothing more to load. -->
+                        <div id="ntpResultsFooter" class="ntp-progress-footer" style="display:none;"></div>
                     </div>
                 </div>
 
@@ -1574,11 +1599,61 @@
         }
 
         // ── Item search + render ──────────────────────────────────────────
+        // ── Items table state ─────────────────────────────────────────────
+        // Pagination state. ntpItemsTotal is the post-filter total reported
+        // by the most recent /Items response. ntpItemsLoaded is the count
+        // of rows currently rendered in the DOM. Resets on every fresh
+        // search / filter / sort change; "Load more" / "Load all" append
+        // additional rows without re-rendering the existing ones.
+        var ntpItemsTotal = 0;
+        var ntpItemsLoaded = 0;
+        var ntpItemsPageSize = 500;       // initial fetch + each "Load more" step
+        var ntpItemsLoadingMore = false;  // re-entrancy guard for "Load all"
+
+        function ntpItemRowHtml(it) {
+            var title = ntpEscape(it.Name);
+            if (it.SeriesName) {
+                title = '<strong>' + ntpEscape(it.SeriesName) + '</strong> · S' + (it.SeasonNumber ?? '?') +
+                    'E' + (it.EpisodeNumber ?? '?') + ' · ' + ntpEscape(it.Name);
+            }
+            var status = it.Cached
+                ? '<span class="ntp-badge ntp-badge-cached">✓ ' + ntpFmtBytes(it.CacheSizeBytes) + '</span>'
+                : '<span class="ntp-badge ntp-badge-uncached">— not cached</span>';
+            return '<tr data-item-id="' + it.Id + '">' +
+                '<td><input type="checkbox" class="ntpItemCheck ntp-checkbox" value="' + it.Id + '" /></td>' +
+                '<td>' + title + '</td>' +
+                '<td class="ntp-cell-cache">' + status + '</td>' +
+                '<td class="ntp-actions-cell">' +
+                    '<button class="ntp-btn ntp-btn-secondary ntp-btn-sm ntpRowGenerate" data-id="' + it.Id + '" type="button">' + (it.Cached ? 'Regenerate' : 'Generate') + '</button>' +
+                    (it.Cached ? '<button class="ntp-btn ntp-btn-danger ntp-btn-sm ntpRowEvict" data-id="' + it.Id + '" type="button">Evict</button>' : '') +
+                '</td></tr>';
+        }
+
+        // Wire row buttons. Called on initial render AND after appending
+        // — only newly-added buttons need handlers, but addEventListener
+        // is idempotent only on the same node, so we set a sentinel
+        // attribute to avoid double-binding existing rows.
+        function ntpWireItemRowButtons(scope) {
+            scope.querySelectorAll('.ntpRowGenerate:not([data-wired])').forEach(function (b) {
+                b.setAttribute('data-wired', '1');
+                b.addEventListener('click', function () { ntpAct('Generate', [b.dataset.id], b); });
+            });
+            scope.querySelectorAll('.ntpRowEvict:not([data-wired])').forEach(function (b) {
+                b.setAttribute('data-wired', '1');
+                b.addEventListener('click', function () { ntpAct('Evict', [b.dataset.id], b); });
+            });
+        }
+
+        // Render a fresh response (search / filter / sort change). Replaces
+        // the entire table and resets pagination state.
         function ntpRenderItems(resp) {
-            var meta = document.querySelector('#ntpResultsMeta');
-            meta.textContent = resp.Items.length + ' shown · ' + resp.Total + ' total';
+            ntpItemsTotal = resp.Total;
+            ntpItemsLoaded = resp.Items.length;
+            var results = document.querySelector('#ntpResults');
             if (resp.Items.length === 0) {
-                document.querySelector('#ntpResults').innerHTML = '<div class="ntp-empty">No items match the current filter.</div>';
+                results.innerHTML = '<div class="ntp-empty">No items match the current filter.</div>';
+                ntpUpdateResultsMeta();
+                ntpUpdateResultsFooter();
                 return;
             }
             var html = '<table class="ntp-table"><thead><tr>' +
@@ -1587,32 +1662,74 @@
                 '<th style="width:8em;">Cache</th>' +
                 '<th style="width:14em;">Actions</th>' +
                 '</tr></thead><tbody>' +
-                resp.Items.map(function (it) {
-                    var title = ntpEscape(it.Name);
-                    if (it.SeriesName) {
-                        title = '<strong>' + ntpEscape(it.SeriesName) + '</strong> · S' + (it.SeasonNumber ?? '?') +
-                            'E' + (it.EpisodeNumber ?? '?') + ' · ' + ntpEscape(it.Name);
-                    }
-                    var status = it.Cached
-                        ? '<span class="ntp-badge ntp-badge-cached">✓ ' + ntpFmtBytes(it.CacheSizeBytes) + '</span>'
-                        : '<span class="ntp-badge ntp-badge-uncached">— not cached</span>';
-                    return '<tr data-item-id="' + it.Id + '">' +
-                        '<td><input type="checkbox" class="ntpItemCheck ntp-checkbox" value="' + it.Id + '" /></td>' +
-                        '<td>' + title + '</td>' +
-                        '<td class="ntp-cell-cache">' + status + '</td>' +
-                        '<td class="ntp-actions-cell">' +
-                            '<button class="ntp-btn ntp-btn-secondary ntp-btn-sm ntpRowGenerate" data-id="' + it.Id + '" type="button">' + (it.Cached ? 'Regenerate' : 'Generate') + '</button>' +
-                            (it.Cached ? '<button class="ntp-btn ntp-btn-danger ntp-btn-sm ntpRowEvict" data-id="' + it.Id + '" type="button">Evict</button>' : '') +
-                        '</td></tr>';
-                }).join('') + '</tbody></table>';
-            document.querySelector('#ntpResults').innerHTML = html;
-            document.querySelectorAll('.ntpRowGenerate').forEach(function (b) {
-                b.addEventListener('click', function () { ntpAct('Generate', [b.dataset.id], b); });
-            });
-            document.querySelectorAll('.ntpRowEvict').forEach(function (b) {
-                b.addEventListener('click', function () { ntpAct('Evict', [b.dataset.id], b); });
-            });
+                resp.Items.map(ntpItemRowHtml).join('') +
+                '</tbody></table>';
+            results.innerHTML = html;
+            ntpWireItemRowButtons(results);
+            ntpApplyCheckState(results);
+            ntpUpdateResultsMeta();
+            ntpUpdateResultsFooter();
+            ntpUpdateSelectionBanner();
         }
+
+        // Append additional pages to the existing table without re-rendering
+        // earlier rows. Uses an off-DOM template element to parse the new
+        // <tr>s, then moves them into the live <tbody> in one shot — much
+        // faster than appending innerHTML to the tbody (which would re-parse
+        // every existing row).
+        function ntpAppendItems(resp) {
+            ntpItemsLoaded += resp.Items.length;
+            var tbody = document.querySelector('#ntpResults table tbody');
+            if (!tbody) {
+                // Defensive: if something cleared the table mid-page, fall
+                // back to a full render. Not expected in practice.
+                ntpRenderItems(resp);
+                return;
+            }
+            var tmpl = document.createElement('template');
+            tmpl.innerHTML = resp.Items.map(ntpItemRowHtml).join('');
+            // Capture the new rows BEFORE moving them into the live tbody —
+            // after appendChild, tmpl.content is empty, so we can't query
+            // it for fresh-row scoped operations.
+            var newRowsScope = tmpl.content;
+            ntpWireItemRowButtons(newRowsScope);
+            ntpApplyCheckState(newRowsScope);
+            tbody.appendChild(tmpl.content);
+            ntpUpdateResultsMeta();
+            ntpUpdateResultsFooter();
+            ntpUpdateSelectionBanner();
+        }
+
+        function ntpUpdateResultsMeta() {
+            var meta = document.querySelector('#ntpResultsMeta');
+            if (!meta) return;
+            if (ntpItemsTotal === 0) { meta.textContent = ''; return; }
+            meta.textContent = ntpItemsLoaded + ' shown · ' + ntpItemsTotal + ' total';
+        }
+
+        // Footer below the results table. Shows pagination buttons whenever
+        // there are more results available than currently rendered.
+        function ntpUpdateResultsFooter() {
+            var footer = document.querySelector('#ntpResultsFooter');
+            if (!footer) return;
+            var remaining = ntpItemsTotal - ntpItemsLoaded;
+            if (remaining <= 0) { footer.style.display = 'none'; footer.innerHTML = ''; return; }
+            footer.style.display = '';
+            var nextChunk = Math.min(ntpItemsPageSize, remaining);
+            footer.innerHTML =
+                '<span>+ ' + remaining + ' more match' + (remaining === 1 ? '' : 'es') + '</span>' +
+                '<span style="display:flex;gap:8px;">' +
+                    '<button type="button" class="ntp-mini-action" id="ntpItemsLoadMore">Load ' + nextChunk + ' more</button>' +
+                    (remaining > nextChunk
+                        ? '<button type="button" class="ntp-mini-action" id="ntpItemsLoadAll">Load all (' + remaining + ')</button>'
+                        : '') +
+                '</span>';
+            var loadMoreBtn = document.querySelector('#ntpItemsLoadMore');
+            if (loadMoreBtn) loadMoreBtn.addEventListener('click', function () { ntpLoadMore(false); });
+            var loadAllBtn = document.querySelector('#ntpItemsLoadAll');
+            if (loadAllBtn) loadAllBtn.addEventListener('click', function () { ntpLoadMore(true); });
+        }
+
         // Loading-state ref-counter so overlapping searches don't
         // flicker the bar off mid-fetch.
         var ntpInflightSearches = 0;
@@ -1623,19 +1740,92 @@
             if (ntpInflightSearches > 0) card.classList.add('loading');
             else card.classList.remove('loading');
         }
-        function ntpRunSearch() {
+
+        // Build the query string for /Items. Centralized so both the fresh
+        // search and pagination calls stay consistent on filter / sort.
+        function ntpItemsQs(offset, limit) {
             var search = document.querySelector('#ntpSearch').value.trim();
             var cached = document.querySelector('#ntpFilterCached').value;
             var sort = document.querySelector('#ntpSortBy').value;
             var qs = 'cached=' + encodeURIComponent(cached) +
                      '&sort=' + encodeURIComponent(sort) +
-                     '&limit=200';
+                     '&offset=' + offset +
+                     '&limit=' + limit;
             if (search) qs += '&search=' + encodeURIComponent(search);
+            return qs;
+        }
+
+        function ntpRunSearch() {
+            // Fresh search: reset state, fetch first page.
             ntpSetSearchLoading(true);
-            return ntpFetch('Items?' + qs)
+            return ntpFetch('Items?' + ntpItemsQs(0, ntpItemsPageSize))
                 .then(ntpRenderItems)
                 .finally(function () { ntpSetSearchLoading(false); });
         }
+
+        // Append the next batch of results. When `all` is true, keeps
+        // fetching pages until everything is loaded (visual feedback while
+        // looping). Each request still capped server-side at 1000 rows;
+        // very large result sets just take a few round trips.
+        function ntpLoadMore(all) {
+            if (ntpItemsLoadingMore) return Promise.resolve();
+            ntpItemsLoadingMore = true;
+            ntpSetSearchLoading(true);
+            var loadAllBtn = document.querySelector('#ntpItemsLoadAll');
+            if (all && loadAllBtn) { loadAllBtn.disabled = true; loadAllBtn.textContent = 'Loading…'; }
+            var loadMoreBtn = document.querySelector('#ntpItemsLoadMore');
+            if (loadMoreBtn) { loadMoreBtn.disabled = true; loadMoreBtn.textContent = 'Loading…'; }
+
+            function step() {
+                var remaining = ntpItemsTotal - ntpItemsLoaded;
+                if (remaining <= 0) return Promise.resolve();
+                var batch = Math.min(ntpItemsPageSize, remaining);
+                return ntpFetch('Items?' + ntpItemsQs(ntpItemsLoaded, batch))
+                    .then(function (resp) {
+                        ntpAppendItems(resp);
+                        if (all && ntpItemsLoaded < ntpItemsTotal) return step();
+                    });
+            }
+
+            return step()
+                .catch(function (err) { ntpToast('Load failed: ' + (err && err.message ? err.message : 'unknown'), 'error'); })
+                .finally(function () {
+                    ntpItemsLoadingMore = false;
+                    ntpSetSearchLoading(false);
+                });
+        }
+        // Bulk action by filter — used when selection mode is 'allMatching'.
+        // POSTs the captured filter snapshot to /GenerateMatching or
+        // /EvictMatching; the server iterates the entire match set, so this
+        // works for selections covering items the client never paged in.
+        function ntpActMatching(verb, btn) {
+            var snapshot = ntpAllMatchingSnapshot;
+            if (!snapshot) {
+                ntpToast('No selection.', 'warning');
+                return Promise.resolve();
+            }
+            var endpoint = verb + 'Matching';
+            return ntpWithBusy(btn, function () {
+                return ntpFetch(endpoint, {
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify(snapshot)
+                });
+            }).then(function (r) {
+                var n = r.Queued || 0;
+                var actionLabel = verb === 'Generate' ? 'queued for generation' : 'evicted from cache';
+                var msg = n + ' item' + (n === 1 ? '' : 's') + ' ' + actionLabel;
+                if (r.Skipped > 0) msg += ' · ' + r.Skipped + ' skipped';
+                ntpToast(msg, 'success');
+                ntpRefreshStatus();
+                ntpClearSelection();
+                if (verb === 'Generate') ntpPollProgress();
+                if (verb === 'Evict') ntpRunSearch();
+            }).catch(function (err) {
+                ntpToast('Action failed' + (err && err.message ? ': ' + err.message : ''), 'error');
+            });
+        }
+
         function ntpAct(verb, ids, btn) {
             if (!ids || ids.length === 0) {
                 ntpToast('Select at least one item first.', 'warning');
@@ -1683,8 +1873,101 @@
                 }
             });
         }
-        function ntpSelectedIds() {
-            return Array.from(document.querySelectorAll('.ntpItemCheck:checked')).map(function (c) { return c.value; });
+        // ── Items selection state ─────────────────────────────────────────
+        // Two selection modes:
+        //   * 'explicit'    — user has individually checked specific item IDs;
+        //                     ntpExplicitSelected is the source of truth and
+        //                     persists across pagination.
+        //   * 'allMatching' — user opted into "select all N items matching
+        //                     this filter" (Gmail-style). The selection is
+        //                     IMPLICIT (defined by the filter snapshot, not
+        //                     a list of IDs); covers items the client has
+        //                     never paginated to. Bulk actions in this mode
+        //                     POST to /GenerateMatching or /EvictMatching
+        //                     so the server iterates the entire match set.
+        // Filter / sort / search changes always reset to explicit + empty —
+        // a stale snapshot would act on the wrong filter.
+        var ntpSelectionMode = 'explicit';
+        var ntpExplicitSelected = new Set();
+        var ntpAllMatchingSnapshot = null;
+
+        // Apply the current selection state to checkboxes within `scope`.
+        // Called from ntpRenderItems (full re-render) and ntpAppendItems
+        // (after Load more / Load all) so newly-arrived rows reflect the
+        // active selection without the user having to re-check anything.
+        function ntpApplyCheckState(scope) {
+            scope.querySelectorAll('.ntpItemCheck').forEach(function (c) {
+                if (ntpSelectionMode === 'allMatching') c.checked = true;
+                else c.checked = ntpExplicitSelected.has(c.value);
+            });
+        }
+
+        // Update the selection banner shown above the table:
+        //   * In allMatching mode: "All N items matching this filter are
+        //     selected. Clear selection."
+        //   * In explicit mode with partial selection AND total > shown:
+        //     "K selected on this page. Select all N items matching this
+        //     filter."
+        //   * Otherwise: hidden.
+        // Banner anchor clicks (#ntpClearSelection / #ntpSelectAllMatching)
+        // are handled by the single delegated listener wired below — see
+        // the 'click' listener on #ntpSelectionBanner during init.
+        function ntpUpdateSelectionBanner() {
+            var banner = document.querySelector('#ntpSelectionBanner');
+            if (!banner) return;
+            if (ntpSelectionMode === 'allMatching') {
+                banner.innerHTML =
+                    'All <strong>' + ntpItemsTotal + '</strong> item' +
+                    (ntpItemsTotal === 1 ? '' : 's') +
+                    ' matching this filter are selected. ' +
+                    '<a id="ntpClearSelection">Clear selection</a>';
+                banner.style.display = '';
+                return;
+            }
+            if (ntpExplicitSelected.size > 0 && ntpItemsTotal > ntpItemsLoaded) {
+                banner.innerHTML =
+                    '<strong>' + ntpExplicitSelected.size + '</strong> selected on this page. ' +
+                    '<a id="ntpSelectAllMatching">Select all ' + ntpItemsTotal + ' items matching this filter</a>';
+                banner.style.display = '';
+                return;
+            }
+            banner.style.display = 'none';
+            banner.innerHTML = '';
+        }
+
+        // Enter all-matching mode. Captures the current filter so the
+        // bulk action (later) targets the same set the user is seeing.
+        function ntpEnterAllMatching() {
+            ntpSelectionMode = 'allMatching';
+            // Snapshot the current /Items query params so the bulk action
+            // acts on the exact set the user is looking at, even if they
+            // later edit the filter inputs without re-applying.
+            ntpAllMatchingSnapshot = {
+                Search: (document.querySelector('#ntpSearch').value || '').trim() || null,
+                Cached: document.querySelector('#ntpFilterCached').value,
+                LibraryId: null,
+            };
+            ntpExplicitSelected.clear();
+            ntpApplyCheckState(document);
+            // The "Select all visible" header checkbox doubles as a visual
+            // signal — set it checked + indeterminate=false so it matches
+            // the all-checked state of the rows below.
+            var selAll = document.querySelector('#ntpSelectAll');
+            if (selAll) { selAll.checked = true; selAll.indeterminate = false; }
+            ntpUpdateSelectionBanner();
+        }
+
+        // Reset selection in all forms — called on filter / sort / search
+        // change (the snapshot would be stale) and from the "Clear
+        // selection" link.
+        function ntpClearSelection() {
+            ntpSelectionMode = 'explicit';
+            ntpAllMatchingSnapshot = null;
+            ntpExplicitSelected.clear();
+            document.querySelectorAll('.ntpItemCheck').forEach(function (c) { c.checked = false; });
+            var selAll = document.querySelector('#ntpSelectAll');
+            if (selAll) { selAll.checked = false; selAll.indeterminate = false; }
+            ntpUpdateSelectionBanner();
         }
 
         // ── Wire up all UI events ─────────────────────────────────────────
@@ -1692,11 +1975,15 @@
 
         // Debounced live search: re-run 280ms after typing stops.
         // Enter fires immediately and cancels any pending debounce.
+        // Both paths reset selection — a stale all-matching snapshot would
+        // otherwise act on the previous filter when the user clicks
+        // Generate/Evict after typing a new search.
         var ntpSearchDebounce = null;
         document.querySelector('#ntpSearch').addEventListener('input', function () {
             if (ntpSearchDebounce) clearTimeout(ntpSearchDebounce);
             ntpSearchDebounce = setTimeout(function () {
                 ntpSearchDebounce = null;
+                ntpClearSelection();
                 ntpRunSearch();
             }, 280);
         });
@@ -1704,19 +1991,80 @@
             if (e.key === 'Enter') {
                 e.preventDefault();
                 if (ntpSearchDebounce) { clearTimeout(ntpSearchDebounce); ntpSearchDebounce = null; }
+                ntpClearSelection();
                 ntpRunSearch();
             }
         });
-        document.querySelector('#ntpFilterCached').addEventListener('change', function () { ntpRunSearch(); });
-        document.querySelector('#ntpSortBy').addEventListener('change', function () { ntpRunSearch(); });
+        // Filter / sort change resets selection — the captured snapshot
+        // would no longer match what the user sees, and stale explicit IDs
+        // could leak into the new result set.
+        document.querySelector('#ntpFilterCached').addEventListener('change', function () { ntpClearSelection(); ntpRunSearch(); });
+        document.querySelector('#ntpSortBy').addEventListener('change', function () { ntpClearSelection(); ntpRunSearch(); });
+
+        // Header "Select all visible" checkbox: in explicit mode, toggles
+        // every visible row in/out of the explicit set. Unchecking it is
+        // equivalent to "Clear selection" — it drops both the explicit
+        // set AND any allMatching mode.
         document.querySelector('#ntpSelectAll').addEventListener('change', function (e) {
-            document.querySelectorAll('.ntpItemCheck:not(:disabled)').forEach(function (c) { c.checked = e.target.checked; });
+            if (e.target.checked) {
+                // Adding visible rows to the explicit set; do NOT enter
+                // allMatching automatically — the banner will offer that
+                // option separately if total > visible.
+                if (ntpSelectionMode === 'allMatching') ntpSelectionMode = 'explicit';
+                ntpAllMatchingSnapshot = null;
+                document.querySelectorAll('.ntpItemCheck:not(:disabled)').forEach(function (c) {
+                    c.checked = true;
+                    ntpExplicitSelected.add(c.value);
+                });
+                ntpUpdateSelectionBanner();
+            } else {
+                ntpClearSelection();
+            }
         });
+
+        // Selection banner clicks (delegated). The banner's innerHTML is
+        // rewritten every state change; a single listener on the parent
+        // div survives all those re-renders and fires for the right anchor
+        // by id. Saves having to re-bind individual listeners after every
+        // ntpUpdateSelectionBanner() call.
+        document.querySelector('#ntpSelectionBanner').addEventListener('click', function (e) {
+            if (!e.target || e.target.tagName !== 'A') return;
+            if (e.target.id === 'ntpClearSelection') ntpClearSelection();
+            else if (e.target.id === 'ntpSelectAllMatching') ntpEnterAllMatching();
+        });
+
+        // Per-row checkbox change (delegated). In explicit mode, syncs the
+        // row's checked state into ntpExplicitSelected so the selection
+        // persists across pagination. In allMatching mode, any row change
+        // is treated as the user pivoting back to explicit selection — we
+        // capture currently-visible checked state into the explicit set
+        // so they don't lose what's on screen, then apply the per-row
+        // toggle in explicit mode going forward.
+        document.querySelector('#ntpResults').addEventListener('change', function (e) {
+            if (!e.target.classList || !e.target.classList.contains('ntpItemCheck')) return;
+            var id = e.target.value;
+            if (ntpSelectionMode === 'allMatching') {
+                ntpSelectionMode = 'explicit';
+                ntpAllMatchingSnapshot = null;
+                document.querySelectorAll('.ntpItemCheck:checked').forEach(function (c) {
+                    ntpExplicitSelected.add(c.value);
+                });
+            }
+            if (e.target.checked) ntpExplicitSelected.add(id);
+            else ntpExplicitSelected.delete(id);
+            ntpUpdateSelectionBanner();
+        });
+
+        // Generate/Evict-selected: dispatch to the right endpoint based on
+        // selection mode. allMatching → POST the filter; explicit → POST
+        // the explicit ID list.
         document.querySelector('#ntpGenerateSelectedBtn').addEventListener('click', function (e) {
-            ntpAct('Generate', ntpSelectedIds(), e.currentTarget);
+            if (ntpSelectionMode === 'allMatching') ntpActMatching('Generate', e.currentTarget);
+            else ntpAct('Generate', Array.from(ntpExplicitSelected), e.currentTarget);
         });
         document.querySelector('#ntpEvictSelectedBtn').addEventListener('click', function (e) {
-            ntpAct('Evict', ntpSelectedIds(), e.currentTarget);
+            if (ntpSelectionMode === 'allMatching') ntpActMatching('Evict', e.currentTarget);
+            else ntpAct('Evict', Array.from(ntpExplicitSelected), e.currentTarget);
         });
         document.querySelector('#ntpGenerateLibraryBtn').addEventListener('click', function (e) {
             var btn = e.currentTarget;

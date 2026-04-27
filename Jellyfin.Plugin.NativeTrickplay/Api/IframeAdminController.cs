@@ -119,8 +119,43 @@ public sealed class IframeAdminController : ControllerBase
         [FromQuery] int limit = 100)
     {
         offset = Math.Max(0, offset);
-        limit = Math.Clamp(limit, 1, 500);
+        // Cap the per-request limit at 1000. The dashboard's "Load all" path
+        // can paginate beyond this in chunks; clients that want everything
+        // in one shot can request up to 1000 rows directly. Going higher
+        // than 1000 in a single request risks slow rendering on the client
+        // when entire libraries with thousands of episodes are returned.
+        limit = Math.Clamp(limit, 1, 1000);
 
+        var items = ResolveFilteredItems(search, libraryId, cached);
+
+        // Pre-compute the cache size map once — EnumerateCache walks the
+        // filesystem; calling it per-item is O(N²). Only include COMPLETE
+        // entries (with `.source-mtime` stamp) so an item that's mid-encode
+        // doesn't display a misleading partial size in its row alongside an
+        // (incorrect) "cached" indicator. Cached-flag itself uses
+        // TryGetCached which already validates completeness — this aligns
+        // the displayed size with that flag.
+        var sizeByItem = _cache.EnumerateCache()
+            .Where(e => e.IsComplete)
+            .ToDictionary(e => e.ItemId, e => e.SizeBytes);
+
+        IEnumerable<ItemRow> rowSource = items.Select(i => MakeRow(i, sizeByItem));
+        var rows = ApplySort(rowSource, sort).ToList();
+        var page = rows.Skip(offset).Take(limit).ToList();
+        return new ItemsResponse(rows.Count, offset, limit, page);
+    }
+
+    /// <summary>
+    /// Apply the same search + library + cached filters as <see cref="ListItems"/>
+    /// and return matching items (no sort, no pagination, no row enrichment).
+    /// Used by the bulk Generate/Evict-by-filter endpoints so the dashboard's
+    /// "Select all N matching" action can act on items the client never paged
+    /// in. Search semantics, path-must-be-set check, and cached-true/false
+    /// gating mirror ListItems exactly so the UI's selection count matches
+    /// what the bulk action processes.
+    /// </summary>
+    private List<BaseItem> ResolveFilteredItems(string? search, Guid? libraryId, string? cached)
+    {
         var query = new InternalItemsQuery
         {
             IncludeItemTypes = PlayableVideoKinds,
@@ -129,7 +164,7 @@ public sealed class IframeAdminController : ControllerBase
         };
         if (libraryId.HasValue && libraryId.Value != Guid.Empty) query.ParentId = libraryId.Value;
 
-        var items = _libraryManager.GetItemList(query);
+        IEnumerable<BaseItem> items = _libraryManager.GetItemList(query);
 
         // Search filter — see ParseSearchQuery for what it recognizes. The
         // raw query is parsed into (tokens, season?, episode?) and we apply
@@ -163,37 +198,20 @@ public sealed class IframeAdminController : ControllerBase
                     if (episode.HasValue && ep.IndexNumber != episode.Value) return false;
                 }
                 return true;
-            }).ToList();
+            });
         }
 
-        // Pre-compute the cache size map once — EnumerateCache walks the
-        // filesystem; calling it per-item is O(N²). Only include COMPLETE
-        // entries (with `.source-mtime` stamp) so an item that's mid-encode
-        // doesn't display a misleading partial size in its row alongside an
-        // (incorrect) "cached" indicator. Cached-flag itself uses
-        // TryGetCached which already validates completeness — this aligns
-        // the displayed size with that flag.
-        var sizeByItem = _cache.EnumerateCache()
-            .Where(e => e.IsComplete)
-            .ToDictionary(e => e.ItemId, e => e.SizeBytes);
+        items = items.Where(i => !string.IsNullOrEmpty(i.Path));
 
-        // Materialize rows with cache status, then apply the requested sort.
-        // Sort happens after status enrichment so we can sort by cached flag
-        // / cache size without a second library scan.
-        IEnumerable<ItemRow> rowSource = items
-            .Where(i => !string.IsNullOrEmpty(i.Path))
-            .Select(i => (item: i, row: MakeRow(i, sizeByItem)))
-            .Select(x => x.row);
+        // Cached filter: compare against the cache state once.
+        if (!string.IsNullOrEmpty(cached) && !cached.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            bool wantCached = cached.Equals("true", StringComparison.OrdinalIgnoreCase);
+            var cachedSet = new HashSet<Guid>(_cache.EnumerateCache().Where(e => e.IsComplete).Select(e => e.ItemId));
+            items = items.Where(i => cachedSet.Contains(i.Id) == wantCached);
+        }
 
-        var rows = ApplySort(rowSource, sort).ToList();
-
-        if (cached.Equals("true", StringComparison.OrdinalIgnoreCase))
-            rows = rows.Where(r => r.Cached).ToList();
-        else if (cached.Equals("false", StringComparison.OrdinalIgnoreCase))
-            rows = rows.Where(r => !r.Cached).ToList();
-
-        var page = rows.Skip(offset).Take(limit).ToList();
-        return new ItemsResponse(rows.Count, offset, limit, page);
+        return items.ToList();
     }
 
     private static IEnumerable<ItemRow> ApplySort(IEnumerable<ItemRow> rows, string sort)
@@ -332,6 +350,51 @@ public sealed class IframeAdminController : ControllerBase
         _logger.LogInformation(
             "[NativeTrickplay] admin Evict: {Evicted} evicted, {Skipped} skipped",
             evicted, skipped);
+        return new MutationResponse(evicted, skipped);
+    }
+
+    /// <summary>
+    /// Bulk generate every item matching a filter — the same filter the
+    /// dashboard's /Items search uses. Backs the dashboard's "Select all
+    /// N matching" action: the client paginates results in chunks, but
+    /// for bulk generate-by-filter the server iterates the entire match
+    /// set so the user doesn't have to load every page first.
+    /// </summary>
+    [HttpPost("GenerateMatching")]
+    public ActionResult<MutationResponse> GenerateMatching([FromBody] FilterRequest req)
+    {
+        var items = ResolveFilteredItems(req?.Search, req?.LibraryId, req?.Cached);
+        int queued = 0, skipped = 0;
+        foreach (var item in items)
+        {
+            if (item.IsFolder) { skipped++; continue; }
+            _cache.Warmup(item.Id);
+            queued++;
+        }
+        _logger.LogInformation(
+            "[NativeTrickplay] admin GenerateMatching: queued {Queued} (filter: search='{Search}' library='{Library}' cached='{Cached}')",
+            queued, req?.Search ?? "", req?.LibraryId, req?.Cached ?? "all");
+        return new MutationResponse(queued, skipped);
+    }
+
+    /// <summary>
+    /// Bulk evict every cached entry matching a filter. Same filter shape
+    /// as <see cref="GenerateMatching"/>. Items currently mid-encode are
+    /// silently skipped by TryEvict and counted in Skipped.
+    /// </summary>
+    [HttpPost("EvictMatching")]
+    public ActionResult<MutationResponse> EvictMatching([FromBody] FilterRequest req)
+    {
+        var items = ResolveFilteredItems(req?.Search, req?.LibraryId, req?.Cached);
+        int evicted = 0, skipped = 0;
+        foreach (var item in items)
+        {
+            if (_cache.TryEvict(item.Id)) evicted++;
+            else skipped++;
+        }
+        _logger.LogInformation(
+            "[NativeTrickplay] admin EvictMatching: evicted {Evicted}, skipped {Skipped} (filter: search='{Search}' library='{Library}' cached='{Cached}')",
+            evicted, skipped, req?.Search ?? "", req?.LibraryId, req?.Cached ?? "all");
         return new MutationResponse(evicted, skipped);
     }
 
@@ -489,6 +552,10 @@ public sealed class IframeAdminController : ControllerBase
         bool Cached, long? CacheSizeBytes);
     public sealed record ItemIdsRequest(List<Guid> ItemIds);
     public sealed record LibraryRequest(Guid LibraryId);
+    // Mirror of the /Items query params — used by GenerateMatching / EvictMatching
+    // so the dashboard can act on every item matching a search/filter without
+    // having to load every page client-side first.
+    public sealed record FilterRequest(string? Search, Guid? LibraryId, string? Cached);
     public sealed record MutationResponse(int Queued, int Skipped);
     // Cancel uses a dedicated response so the field name reflects the
     // semantic action (Canceled, not Queued). UI reads resp.Canceled.
