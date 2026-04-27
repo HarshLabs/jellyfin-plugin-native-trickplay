@@ -36,23 +36,74 @@ jobs:
       - name: Install jprm
         run: pip install --upgrade jprm
 
-      - name: Determine version
+      - name: Determine version + changelog
         id: version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
+            # Pull the annotated tag's message as the changelog. Lightweight
+            # tags (no -m on `git tag`) fall back to the tagged commit's
+            # message. This is what populates manifest.json's per-version
+            # changelog field — keep tag messages clear and user-facing.
+            CHANGELOG="$(git tag -l --format='%(contents)' "v$VERSION" | sed -e :a -e '/^\s*$/{$d;N;ba' -e '}')"
+            if [[ -z "$CHANGELOG" ]]; then
+              CHANGELOG="$(git log -1 --pretty=%B "v$VERSION")"
+            fi
           else
             VERSION="${{ github.event.inputs.version }}"
+            CHANGELOG="Dry-run build"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Multiline output via heredoc delimiter so newlines survive.
+          {
+            echo 'changelog<<NTP_CHANGELOG_EOF'
+            echo "$CHANGELOG"
+            echo 'NTP_CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
+          echo "Changelog (first 200 chars): ${CHANGELOG:0:200}"
+
+      - name: Patch build.yaml changelog
+        # jprm reads build.yaml's `changelog:` field and embeds it into the
+        # zip's meta.json, which `jprm repo add` then mirrors into
+        # manifest.json. Patching the YAML in-place before build is the
+        # cleanest way to inject per-release notes without touching jprm.
+        run: |
+          python3 <<'PY'
+          import os
+          path = 'Jellyfin.Plugin.NativeTrickplay/build.yaml'
+          changelog = os.environ['CHANGELOG'].rstrip() + '\n'
+          # Hand-roll the rewrite to preserve YAML formatting / comments
+          # we'd lose with a full PyYAML round-trip.
+          with open(path) as f:
+              lines = f.readlines()
+          out = []
+          i = 0
+          while i < len(lines):
+              if lines[i].startswith('changelog:'):
+                  out.append('changelog: |\n')
+                  for cl in changelog.splitlines():
+                      out.append('  ' + cl + '\n')
+                  # Skip the existing changelog block (any indented continuation lines).
+                  i += 1
+                  while i < len(lines) and (lines[i].startswith('  ') or lines[i].strip() == ''):
+                      i += 1
+                  continue
+              out.append(lines[i])
+              i += 1
+          with open(path, 'w') as f:
+              f.writelines(out)
+          print(f'Patched {path} with {len(changelog.splitlines())} changelog lines')
+          PY
+        env:
+          CHANGELOG: ${{ steps.version.outputs.changelog }}
 
       - name: Build plugin zip
         id: build
         run: |
-          # jprm reads build.yaml from the project subdir, runs dotnet publish,
-          # writes <name>_<version>.zip + .md5sum + .meta.json into ./artifacts/.
-          # jprm requires the output dir to exist already.
+          # jprm reads build.yaml from the project subdir (now patched with
+          # the real per-release changelog), runs dotnet publish, writes
+          # <name>_<version>.zip + .md5sum + .meta.json into ./artifacts/.
           mkdir -p artifacts
           jprm --verbosity=debug plugin build \
             --version="${{ steps.version.outputs.version }}" \

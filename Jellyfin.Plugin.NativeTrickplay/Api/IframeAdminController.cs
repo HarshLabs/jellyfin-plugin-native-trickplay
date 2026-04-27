@@ -265,6 +265,55 @@ public sealed class IframeAdminController : ControllerBase
     }
 
     /// <summary>
+    /// Cancel one or more in-flight encodes (queued or running). Idempotent:
+    /// items not currently in flight are silently skipped. Cancellation
+    /// kills any running ffmpeg, releases the encoder slot, and deletes
+    /// the partial .tmp output. Any previously-completed cache for the same
+    /// item remains intact and continues serving.
+    /// </summary>
+    [HttpPost("Cancel")]
+    public ActionResult<CancelResponse> Cancel([FromBody] ItemIdsRequest req)
+    {
+        if (req?.ItemIds is null || req.ItemIds.Count == 0)
+            return new CancelResponse(0, 0);
+
+        int canceled = 0, skipped = 0;
+        foreach (var id in req.ItemIds)
+        {
+            if (id == Guid.Empty) { skipped++; continue; }
+            if (_cache.TryCancel(id)) canceled++;
+            else skipped++;
+        }
+        _logger.LogInformation(
+            "[NativeTrickplay] admin Cancel: {Canceled} canceled, {Skipped} skipped",
+            canceled, skipped);
+        return new CancelResponse(canceled, skipped);
+    }
+
+    /// <summary>
+    /// Cancel every in-flight encode (queued + running). Convenience for
+    /// the dashboard's "Cancel all" action — saves the client from
+    /// enumerating the inflight list and posting N item IDs back.
+    /// </summary>
+    [HttpPost("CancelAll")]
+    public ActionResult<CancelResponse> CancelAll()
+    {
+        int canceled = 0;
+        // Snapshot the inflight list first — TryCancel mutates _inflightProgress
+        // via the encode worker's finally block, which would invalidate an
+        // in-flight enumeration.
+        var ids = _cache.EnumerateInFlight().Select(p => p.ItemId).ToList();
+        foreach (var id in ids)
+        {
+            if (_cache.TryCancel(id)) canceled++;
+        }
+        _logger.LogInformation(
+            "[NativeTrickplay] admin CancelAll: {Canceled} of {Total} canceled",
+            canceled, ids.Count);
+        return new CancelResponse(canceled, ids.Count - canceled);
+    }
+
+    /// <summary>
     /// Evict cache entries for one or more items. In-flight encodes are
     /// skipped (the cache returns false from TryEvict in that case).
     /// </summary>
@@ -441,4 +490,7 @@ public sealed class IframeAdminController : ControllerBase
     public sealed record ItemIdsRequest(List<Guid> ItemIds);
     public sealed record LibraryRequest(Guid LibraryId);
     public sealed record MutationResponse(int Queued, int Skipped);
+    // Cancel uses a dedicated response so the field name reflects the
+    // semantic action (Canceled, not Queued). UI reads resp.Canceled.
+    public sealed record CancelResponse(int Canceled, int Skipped);
 }

@@ -111,6 +111,14 @@ public sealed class IframeAssetCache
         // duration (live recordings, damaged files); when null the UI falls
         // back to byte-based progress.
         public long? SourceDurationMicros { get; init; }
+        // Per-item cancellation source, linked to the application-lifetime
+        // token. Calling Cts.Cancel() interrupts whichever stage the encode
+        // is in: queued (waitQueue removal in AcquireSlotAsync), running
+        // (ffmpeg kill via Process.Kill(entireProcessTree:true)), or
+        // post-process (Mp4BoxScanner / probe). Disposed by GenerateAsync
+        // when the encode finishes — TryCancel must tolerate
+        // ObjectDisposedException on a race with completion.
+        public CancellationTokenSource? Cts { get; init; }
         // Current encoding speed multiplier vs realtime (e.g. 2.13x means
         // 1 minute of source consumed per 28s of wall time). Sourced from
         // ffmpeg's `speed=N.NNx` progress line. Used by the UI to render an
@@ -188,24 +196,40 @@ public sealed class IframeAssetCache
 
     private void ReleaseSlot()
     {
-        TaskCompletionSource<bool>? hand = null;
-        lock (_slotLock)
+        // Loop because TrySetResult may fail when a waiter is concurrently
+        // canceled in the tiny race window between our IsCanceled check
+        // (under _slotLock) and the actual TrySetResult call (outside the
+        // lock). On TrySetResult-failed, retry with the next waiter; if
+        // none remain, increment slotsAvailable. Without this loop, an
+        // admin doing a "Cancel all" in the same tick as an encode finishing
+        // could permanently lose a slot from the pool.
+        while (true)
         {
-            // Pick the highest-priority, oldest-sequence waiter that
-            // hasn't been canceled. Skip any canceled stragglers.
-            while (_waitQueue.Count > 0)
+            TaskCompletionSource<bool>? hand = null;
+            lock (_slotLock)
             {
-                var head = _waitQueue[0];
-                _waitQueue.RemoveAt(0);
-                if (!head.Tcs.Task.IsCanceled)
+                // Pick the highest-priority, oldest-sequence waiter that
+                // hasn't been canceled. Skip any canceled stragglers.
+                while (_waitQueue.Count > 0)
                 {
-                    hand = head.Tcs;
-                    break;
+                    var head = _waitQueue[0];
+                    _waitQueue.RemoveAt(0);
+                    if (!head.Tcs.Task.IsCanceled)
+                    {
+                        hand = head.Tcs;
+                        break;
+                    }
+                }
+                if (hand == null)
+                {
+                    _slotsAvailable++;
+                    return;
                 }
             }
-            if (hand == null) _slotsAvailable++;
+            if (hand.TrySetResult(true)) return;
+            // TrySetResult failed — waiter was canceled in the race window.
+            // Loop and try the next waiter.
         }
-        hand?.TrySetResult(true);
     }
 
     /// <summary>
@@ -571,6 +595,13 @@ public sealed class IframeAssetCache
             seasonNumber = ep.ParentIndexNumber;
             episodeNumber = ep.IndexNumber;
         }
+        // Per-item cancellation source linked to the application-lifetime
+        // token. Calling progress.Cts.Cancel() (via TryCancel) interrupts
+        // whichever stage we're in: queueing, ffmpeg, mp4-box scan, or PTS
+        // probe. Server shutdown still cancels everything via the parent ct.
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var ictk = linkedCts.Token;
+
         var progress = new InflightProgress
         {
             ItemId = itemId,
@@ -583,20 +614,28 @@ public sealed class IframeAssetCache
             SeriesName = seriesName,
             SeasonNumber = seasonNumber,
             EpisodeNumber = episodeNumber,
+            Cts = linkedCts,
         };
         _inflightProgress[key] = progress;
 
-        var slotWaitSw = Stopwatch.StartNew();
-        await AcquireSlotAsync(priority, itemId, ct).ConfigureAwait(false);
-        slotWaitSw.Stop();
-        if (slotWaitSw.ElapsedMilliseconds > 100)
-        {
-            _logger.LogInformation(
-                "[NativeTrickplay] generation queued behind {WaitMs}ms wait for {ItemId} (priority={Priority})",
-                slotWaitSw.ElapsedMilliseconds, itemId, priority);
-        }
+        // slotAcquired tracks whether AcquireSlotAsync succeeded so the outer
+        // finally only releases when there's something to release. Without
+        // this guard, a cancel-during-queue path would over-release and
+        // wedge the slot manager.
+        bool slotAcquired = false;
         try
         {
+            var slotWaitSw = Stopwatch.StartNew();
+            await AcquireSlotAsync(priority, itemId, ictk).ConfigureAwait(false);
+            slotAcquired = true;
+            slotWaitSw.Stop();
+            if (slotWaitSw.ElapsedMilliseconds > 100)
+            {
+                _logger.LogInformation(
+                    "[NativeTrickplay] generation queued behind {WaitMs}ms wait for {ItemId} (priority={Priority})",
+                    slotWaitSw.ElapsedMilliseconds, itemId, priority);
+            }
+
             var tmpSegmentPath = segmentPath + ".tmp";
             if (File.Exists(tmpSegmentPath)) File.Delete(tmpSegmentPath);
 
@@ -609,7 +648,7 @@ public sealed class IframeAssetCache
             progress.TmpSegmentPath = tmpSegmentPath;
 
             var ffmpegSw = Stopwatch.StartNew();
-            await RunFfmpegAsync(sourcePath, tmpSegmentPath, variant, progress, ct).ConfigureAwait(false);
+            await RunFfmpegAsync(sourcePath, tmpSegmentPath, variant, progress, ictk).ConfigureAwait(false);
             ffmpegSw.Stop();
             var encodedBytes = File.Exists(tmpSegmentPath) ? new FileInfo(tmpSegmentPath).Length : 0;
             _logger.LogInformation(
@@ -631,7 +670,7 @@ public sealed class IframeAssetCache
                 itemId, fragments.Count, initSize, scanSw.ElapsedMilliseconds);
 
             var probeSw = Stopwatch.StartNew();
-            var durations = await ProbePtsDeltasAsync(tmpSegmentPath, fragments.Count, ct).ConfigureAwait(false);
+            var durations = await ProbePtsDeltasAsync(tmpSegmentPath, fragments.Count, ictk).ConfigureAwait(false);
             probeSw.Stop();
             var template = BuildPlaylist(initSize, fragments, durations);
             var totalDuration = durations.Sum();
@@ -640,8 +679,8 @@ public sealed class IframeAssetCache
                 itemId, probeSw.ElapsedMilliseconds, totalDuration, template.Length);
 
             File.Move(tmpSegmentPath, segmentPath, overwrite: true);
-            await File.WriteAllTextAsync(playlistPath, template, ct).ConfigureAwait(false);
-            await File.WriteAllTextAsync(stampPath, FormatStamp(sourceMtime.Ticks, encoderTag), ct)
+            await File.WriteAllTextAsync(playlistPath, template, ictk).ConfigureAwait(false);
+            await File.WriteAllTextAsync(stampPath, FormatStamp(sourceMtime.Ticks, encoderTag), ictk)
                 .ConfigureAwait(false);
 
             _logger.LogInformation(
@@ -649,6 +688,15 @@ public sealed class IframeAssetCache
                 itemId, item.Name, fragments.Count, encoderTag, encodedBytes / (1024 * 1024),
                 ffmpegSw.ElapsedMilliseconds + scanSw.ElapsedMilliseconds + probeSw.ElapsedMilliseconds);
             return new IframeAsset(template, segmentPath);
+        }
+        catch (OperationCanceledException) when (linkedCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // Per-item cancel via TryCancel (not server shutdown). Log
+            // distinctly so admins can correlate with their dashboard click.
+            _logger.LogInformation(
+                "[NativeTrickplay] generation CANCELED for {ItemId} ({Name}) by admin",
+                itemId, item.Name);
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -665,7 +713,56 @@ public sealed class IframeAssetCache
             // so TryEvict (which checks _inflight as a "currently encoding"
             // proxy) stops returning false after the encode is done.
             _inflight.TryRemove(key, out _);
-            ReleaseSlot();
+
+            // Cancellation cleanup: delete the partial .tmp segment file so
+            // it doesn't sit around eating disk space. (Successful encodes
+            // already moved tmp → final, so File.Exists returns false; this
+            // only matches the canceled / failed case.) The cache directory,
+            // any prior valid stamp file, and any prior valid segment all
+            // remain — a previous successful encode keeps serving.
+            if (linkedCts.IsCancellationRequested && progress.TmpSegmentPath is { } tmpPath)
+            {
+                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); }
+                catch (IOException) { /* best effort */ }
+                catch (UnauthorizedAccessException) { /* best effort */ }
+            }
+
+            if (slotAcquired) ReleaseSlot();
+        }
+    }
+
+    /// <summary>
+    /// Cancel an in-flight encode (queued or running). Returns true if the
+    /// item was found and cancellation was triggered, false if the item
+    /// wasn't in flight (already done, never queued, or raced with completion).
+    /// Idempotent — calling repeatedly for the same item is safe.
+    /// </summary>
+    public bool TryCancel(Guid itemId)
+    {
+        var key = itemId.ToString("N");
+        if (!_inflightProgress.TryGetValue(key, out var p) || p.Cts is null)
+        {
+            return false;
+        }
+        try
+        {
+            p.Cts.Cancel();
+            _logger.LogInformation(
+                "[NativeTrickplay] cancel requested for {ItemId} ({Name})",
+                itemId, p.Name);
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            // Encode finished and disposed its CTS between the dict lookup
+            // and our Cancel call — treat as a no-op cancel (the item was
+            // already going away anyway).
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[NativeTrickplay] TryCancel: error canceling {ItemId}", itemId);
+            return false;
         }
     }
 
@@ -1341,7 +1438,24 @@ public sealed class IframeAssetCache
         }
         catch (OperationCanceledException)
         {
-            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { /* already gone */ }
+            try
+            {
+                if (!proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    // Reap the zombie so the OS releases its file
+                    // descriptors. Without this final wait, repeated
+                    // cancel-cycles leak FDs in the parent process.
+                    // Use a separate CT so we never await on the already-
+                    // canceled outer token (would re-throw immediately).
+                    try { await proc.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false); }
+                    catch { /* best effort */ }
+                    _logger.LogInformation(
+                        "[NativeTrickplay] {Bin} killed (exit={ExitCode}) — cancellation acknowledged",
+                        Path.GetFileName(fileName), proc.HasExited ? proc.ExitCode : -1);
+                }
+            }
+            catch { /* already gone */ }
             throw;
         }
 

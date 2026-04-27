@@ -1393,6 +1393,7 @@
                     '<th style="width:7em;">ETA</th>' +
                     '<th style="width:9em;">Output</th>' +
                     '<th style="width:6em;">Progress</th>' +
+                    '<th style="width:6em;">Actions</th>' +
                     '</tr></thead><tbody>' +
                     visible.map(function (it) {
                         var pct = ntpComputePercent(it);
@@ -1419,6 +1420,10 @@
                         var meta = ntpInflightMetaLine(it);
                         var itemCell = ntpInflightDisplayName(it) +
                             (meta ? '<div style="opacity:0.55;font-size:0.85em;margin-top:2px;">' + meta + '</div>' : '');
+                        // Cancel button: per-row action that POSTs the item
+                        // ID to /Cancel. data-id carries the GUID; click
+                        // wiring happens after innerHTML below.
+                        var cancelCell = '<button type="button" class="ntp-mini-action ntp-progress-cancel" data-id="' + ntpEscape(it.ItemId) + '" data-name="' + ntpEscape(it.ItemName) + '" title="Cancel this encode">Cancel</button>';
                         return '<tr>' +
                             '<td>' + itemCell + '</td>' +
                             '<td>' + badge + '</td>' +
@@ -1426,8 +1431,36 @@
                             '<td>' + etaCell + '</td>' +
                             '<td>' + (it.PartialBytes ? ntpFmtBytes(it.PartialBytes) : '—') + '</td>' +
                             '<td>' + (pct !== null ? pct + '%' : '—') + '</td>' +
+                            '<td>' + cancelCell + '</td>' +
                             '</tr>';
                     }).join('') + '</tbody></table>';
+
+                // Wire per-row Cancel buttons. Each click posts a single-item
+                // ItemIds array to /Cancel, optimistically dims the row, and
+                // lets the next /Progress poll (within 2s) drop the row from
+                // the visible state.
+                list.querySelectorAll('.ntp-progress-cancel').forEach(function (btn) {
+                    btn.addEventListener('click', function () {
+                        var id = btn.getAttribute('data-id');
+                        var row = btn.closest('tr');
+                        if (row) row.style.opacity = '0.4';
+                        btn.disabled = true;
+                        btn.textContent = 'Canceling…';
+                        ntpFetch('Cancel', { type: 'POST', contentType: 'application/json', data: JSON.stringify({ ItemIds: [id] }) })
+                            .then(function () {
+                                ntpToast('Encode canceled', 'info');
+                                // Trigger a fresh poll so the row clears now
+                                // instead of waiting up to 2s for the next tick.
+                                ntpPollProgress();
+                            })
+                            .catch(function (err) {
+                                if (row) row.style.opacity = '';
+                                btn.disabled = false;
+                                btn.textContent = 'Cancel';
+                                ntpToast('Cancel failed: ' + (err && err.message ? err.message : 'unknown'), 'error');
+                            });
+                    });
+                });
 
             // Footer: progressive expansion controls. Three actions:
             //   • Show 10 more — additive expansion, disabled at cap or total
@@ -1463,6 +1496,10 @@
                         (canCollapse
                             ? '<button type="button" class="ntp-mini-action" id="ntpProgressCollapse">Collapse</button>'
                             : '') +
+                        // Cancel all: destructive bulk action, separated visually
+                        // from the navigation buttons. Confirms before firing
+                        // because there's no undo.
+                        '<button type="button" class="ntp-mini-action" id="ntpProgressCancelAll" style="margin-left:0.5em;">Cancel all</button>' +
                     '</span>';
 
                 ntpWireProgressFooterButton('#ntpProgressShowMore', function () {
@@ -1477,6 +1514,27 @@
                 ntpWireProgressFooterButton('#ntpProgressCollapse', function () {
                     ntpProgressVisibleCount = ntpProgressDefaultLimit;
                 });
+
+                // Cancel-all wiring: separate from the show/collapse helper
+                // because it does an HTTP call instead of a cache re-render.
+                var cancelAllBtn = document.querySelector('#ntpProgressCancelAll');
+                if (cancelAllBtn) {
+                    cancelAllBtn.addEventListener('click', function () {
+                        if (!confirm('Cancel all ' + total + ' active encode' + (total === 1 ? '' : 's') + '?\n\nQueued items will be dropped; running items will be killed mid-stream and any partial output will be discarded. Existing cached entries are unaffected.')) return;
+                        cancelAllBtn.disabled = true;
+                        cancelAllBtn.textContent = 'Canceling…';
+                        ntpFetch('CancelAll', { type: 'POST' })
+                            .then(function (resp) {
+                                ntpToast('Canceled ' + (resp && resp.Canceled != null ? resp.Canceled : '') + ' encode(s)', 'info');
+                                ntpPollProgress();
+                            })
+                            .catch(function (err) {
+                                cancelAllBtn.disabled = false;
+                                cancelAllBtn.textContent = 'Cancel all';
+                                ntpToast('Cancel-all failed: ' + (err && err.message ? err.message : 'unknown'), 'error');
+                            });
+                    });
+                }
             } else {
                 footer.innerHTML = '';
             }
