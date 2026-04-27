@@ -36,18 +36,44 @@ jobs:
       - name: Install jprm
         run: pip install --upgrade jprm
 
+      - name: Fetch annotated tag objects
+        # actions/checkout@v4 with fetch-depth: 0 grabs commits but does
+        # NOT necessarily materialize annotated tag objects (the tag
+        # name resolves to the commit, the tag's own metadata stays
+        # remote). Without this explicit fetch, `git tag -l --format=
+        # '%(contents)' v$VERSION` returns empty for annotated tags and
+        # we silently fall back to the commit message — which becomes
+        # the manifest's user-visible changelog. Force-fetch to be safe.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: git fetch --tags --force --prune origin
+
       - name: Determine version + changelog
         id: version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
-            # Pull the annotated tag's message as the changelog. Lightweight
-            # tags (no -m on `git tag`) fall back to the tagged commit's
-            # message. This is what populates manifest.json's per-version
-            # changelog field — keep tag messages clear and user-facing.
-            CHANGELOG="$(git tag -l --format='%(contents)' "v$VERSION" | sed -e :a -e '/^\s*$/{$d;N;ba' -e '}')"
+            # Pull the annotated tag's message body as the changelog
+            # (`%(contents:body)` skips the subject line so we don't
+            # double-up if the user repeats the version in the tag's
+            # subject). Falls back to `%(contents)` (full message) if
+            # the body is empty, then to the commit subject only as a
+            # last resort. We deliberately do NOT fall back to the full
+            # commit message — it tends to contain implementation detail
+            # that confuses end-users reading the plugin catalog.
+            CHANGELOG="$(git tag -l --format='%(contents:body)' "v$VERSION")"
             if [[ -z "$CHANGELOG" ]]; then
-              CHANGELOG="$(git log -1 --pretty=%B "v$VERSION")"
+              CHANGELOG="$(git tag -l --format='%(contents)' "v$VERSION")"
+            fi
+            if [[ -z "$CHANGELOG" ]]; then
+              # Lightweight tag (no annotation). Use commit *subject* only,
+              # not the full message — keeps catalog text terse.
+              CHANGELOG="$(git log -1 --pretty=%s "v$VERSION")"
+            fi
+            # Strip trailing blank lines.
+            CHANGELOG="$(printf '%s' "$CHANGELOG" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}')"
+            if [[ -z "$CHANGELOG" ]]; then
+              echo "::error::Tag v$VERSION has no annotation and no commit subject — refusing to publish with empty changelog. Re-tag with: git tag -a v$VERSION -m 'user-facing release notes'"
+              exit 1
             fi
           else
             VERSION="${{ github.event.inputs.version }}"
@@ -61,7 +87,9 @@ jobs:
             echo 'NTP_CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
-          echo "Changelog (first 200 chars): ${CHANGELOG:0:200}"
+          echo "----- Changelog (will be embedded in manifest.json) -----"
+          echo "$CHANGELOG"
+          echo "----- end changelog -----"
 
       - name: Patch build.yaml changelog
         # jprm reads build.yaml's `changelog:` field and embeds it into the
