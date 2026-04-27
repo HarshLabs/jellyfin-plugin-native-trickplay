@@ -1,389 +1,397 @@
 [
-  {
-    "guid": "6911edf0-840d-4a71-965d-1319cbb2efd1",
-    "name": "Native Trickplay",
-    "description": "Generates HLS I-frame variants so Apple TV / AVPlayer clients get native\nscrubbing thumbnails on the transport bar — no client-side overlay needed.\nOne-time ffmpeg cost per item, then cached.\nIncludes a configurable daily prune scheduled task (orphan removal,\nage-based eviction, optional LRU size cap) so the cache doesn't grow\nunbounded.\n",
-    "overview": "Native HLS trickplay for AVPlayer-based clients (Apple TV).",
-    "owner": "harshlabsllc",
-    "category": "General",
-    "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
-    "versions": [
-      {
-        "version": "1.1.45.0",
-        "changelog": "Cancel active encodings\n\n* New \"Cancel\" button on each in-flight row in the Encoding-in-progress panel, plus a \"Cancel all\" button in the footer.\n* Works for both queued items (waiting for an encoder slot) and items currently being encoded.\n* Existing cached trickplay for the canceled item is preserved — only the in-progress attempt is dropped.\n* Cancel is idempotent — a second click is harmless.\n\nRelease notes now reflect actual changes per release. Prior versions all showed \"Initial release\" due to a publishing oversight.",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.45.0/native-trickplay_1.1.45.0.zip",
-        "checksum": "017ecd66b29b3cedbb37520f21a7997d",
-        "timestamp": "2026-04-27T00:20:27Z"
-      },
-      {
-        "version": "1.1.44.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.44.0/native-trickplay_1.1.44.0.zip",
-        "checksum": "4c2f945b469fed111f0ea224ee3d634d",
-        "timestamp": "2026-04-26T19:19:57Z"
-      },
-      {
-        "version": "1.1.42.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.42.0/native-trickplay_1.1.42.0.zip",
-        "checksum": "7619e92bd715f9f806cf3e397451deeb",
-        "timestamp": "2026-04-26T18:00:27Z"
-      },
-      {
-        "version": "1.1.41.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.41.0/native-trickplay_1.1.41.0.zip",
-        "checksum": "9737b60e1ba213a1e67b3ba98346ab6f",
-        "timestamp": "2026-04-26T16:04:59Z"
-      },
-      {
-        "version": "1.1.40.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.40.0/native-trickplay_1.1.40.0.zip",
-        "checksum": "8f290d87ecac2ea5660b425173948fd2",
-        "timestamp": "2026-04-26T15:44:04Z"
-      },
-      {
-        "version": "1.1.39.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.39.0/native-trickplay_1.1.39.0.zip",
-        "checksum": "899d9c89c898286644988841eec10655",
-        "timestamp": "2026-04-26T15:37:22Z"
-      },
-      {
-        "version": "1.1.38.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.38.0/native-trickplay_1.1.38.0.zip",
-        "checksum": "6f2c4a5694bbb677a3282ad6756a2701",
-        "timestamp": "2026-04-26T15:16:48Z"
-      },
-      {
-        "version": "1.1.37.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.37.0/native-trickplay_1.1.37.0.zip",
-        "checksum": "a0c0b17854e2e3d9f654b8497ea62cc2",
-        "timestamp": "2026-04-26T15:11:05Z"
-      },
-      {
-        "version": "1.1.36.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.36.0/native-trickplay_1.1.36.0.zip",
-        "checksum": "24b6fe32a29359b64b0bce34d9813a71",
-        "timestamp": "2026-04-26T14:55:29Z"
-      },
-      {
-        "version": "1.1.35.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.35.0/native-trickplay_1.1.35.0.zip",
-        "checksum": "c6a489b95e3fd88d690fcd4795e7479b",
-        "timestamp": "2026-04-26T14:36:10Z"
-      },
-      {
-        "version": "1.1.34.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.34.0/native-trickplay_1.1.34.0.zip",
-        "checksum": "c3add2b666bcf2205a19aba48ce82ff2",
-        "timestamp": "2026-04-26T02:46:51Z"
-      },
-      {
-        "version": "1.1.33.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.33.0/native-trickplay_1.1.33.0.zip",
-        "checksum": "f84be54922f35a144cb0d66c88dd9913",
-        "timestamp": "2026-04-26T02:29:52Z"
-      },
-      {
-        "version": "1.1.32.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.32.0/native-trickplay_1.1.32.0.zip",
-        "checksum": "b876d73e4139fbfcc598217226935ff0",
-        "timestamp": "2026-04-25T23:37:30Z"
-      },
-      {
-        "version": "1.1.31.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.31.0/native-trickplay_1.1.31.0.zip",
-        "checksum": "7bd03cc9b4070501f978d76463b40b2a",
-        "timestamp": "2026-04-25T21:36:11Z"
-      },
-      {
-        "version": "1.1.30.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.30.0/native-trickplay_1.1.30.0.zip",
-        "checksum": "a5787e462555f9c502c489dec728dd5f",
-        "timestamp": "2026-04-25T21:26:11Z"
-      },
-      {
-        "version": "1.1.29.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.29.0/native-trickplay_1.1.29.0.zip",
-        "checksum": "df1203bf3016f892ce6cc2172297e758",
-        "timestamp": "2026-04-25T21:18:06Z"
-      },
-      {
-        "version": "1.1.28.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.28.0/native-trickplay_1.1.28.0.zip",
-        "checksum": "25bef037812598f602fe56a3c88cba60",
-        "timestamp": "2026-04-25T21:10:10Z"
-      },
-      {
-        "version": "1.1.27.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.27.0/native-trickplay_1.1.27.0.zip",
-        "checksum": "72dbff5107c039f109b51fbcb9ff5c4f",
-        "timestamp": "2026-04-25T20:51:02Z"
-      },
-      {
-        "version": "1.1.26.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.26.0/native-trickplay_1.1.26.0.zip",
-        "checksum": "ade1ec599ef5f18cd0f1b49778c52c31",
-        "timestamp": "2026-04-25T19:23:58Z"
-      },
-      {
-        "version": "1.1.25.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.25.0/native-trickplay_1.1.25.0.zip",
-        "checksum": "e429f8b043bc4584ad472f7cf9e92137",
-        "timestamp": "2026-04-25T19:01:02Z"
-      },
-      {
-        "version": "1.1.24.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.24.0/native-trickplay_1.1.24.0.zip",
-        "checksum": "9611a6b56794e30a1832c2d07eb225ac",
-        "timestamp": "2026-04-25T18:43:54Z"
-      },
-      {
-        "version": "1.1.23.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.23.0/native-trickplay_1.1.23.0.zip",
-        "checksum": "60361203468e08f26745260775f4fb5e",
-        "timestamp": "2026-04-25T18:33:22Z"
-      },
-      {
-        "version": "1.1.22.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.22.0/native-trickplay_1.1.22.0.zip",
-        "checksum": "e7daeacf942db9efad5c0a9ce1be3ef7",
-        "timestamp": "2026-04-25T18:31:36Z"
-      },
-      {
-        "version": "1.1.21.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.21.0/native-trickplay_1.1.21.0.zip",
-        "checksum": "39c749c0d91f014b4998be188cbfff51",
-        "timestamp": "2026-04-25T18:29:19Z"
-      },
-      {
-        "version": "1.1.20.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.20.0/native-trickplay_1.1.20.0.zip",
-        "checksum": "9ef7a08a11f4be894a0b243caf39e14e",
-        "timestamp": "2026-04-25T18:26:44Z"
-      },
-      {
-        "version": "1.1.19.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.19.0/native-trickplay_1.1.19.0.zip",
-        "checksum": "d660f84a8120832a210b1f766372ba12",
-        "timestamp": "2026-04-25T18:19:44Z"
-      },
-      {
-        "version": "1.1.18.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.18.0/native-trickplay_1.1.18.0.zip",
-        "checksum": "7039876bff02c368b44956ad2280d42f",
-        "timestamp": "2026-04-25T18:14:10Z"
-      },
-      {
-        "version": "1.1.17.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.17.0/native-trickplay_1.1.17.0.zip",
-        "checksum": "23fad14932a0b57d2208fe69f56fa9a9",
-        "timestamp": "2026-04-25T18:09:26Z"
-      },
-      {
-        "version": "1.1.16.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.16.0/native-trickplay_1.1.16.0.zip",
-        "checksum": "835a5f4aa0373adb01c254934db2516e",
-        "timestamp": "2026-04-25T18:05:12Z"
-      },
-      {
-        "version": "1.1.15.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.15.0/native-trickplay_1.1.15.0.zip",
-        "checksum": "678de74969f18d570bcc91a5ac73ae8e",
-        "timestamp": "2026-04-25T18:00:40Z"
-      },
-      {
-        "version": "1.1.14.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.14.0/native-trickplay_1.1.14.0.zip",
-        "checksum": "8859ebb4224e180a35bfb4381f4a1bc9",
-        "timestamp": "2026-04-25T17:53:33Z"
-      },
-      {
-        "version": "1.1.13.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.13.0/native-trickplay_1.1.13.0.zip",
-        "checksum": "fba6cbcd070d6f6c4e8a22210a6a9da3",
-        "timestamp": "2026-04-25T17:45:50Z"
-      },
-      {
-        "version": "1.1.12.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.12.0/native-trickplay_1.1.12.0.zip",
-        "checksum": "43aeb2b4e711e939653fb92936594691",
-        "timestamp": "2026-04-25T17:12:00Z"
-      },
-      {
-        "version": "1.1.9.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.9.0/native-trickplay_1.1.9.0.zip",
-        "checksum": "52ea44b438ace7d0f66fc37083494492",
-        "timestamp": "2026-04-25T16:33:36Z"
-      },
-      {
-        "version": "1.1.2.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.2.0/native-trickplay_1.1.2.0.zip",
-        "checksum": "9b6e0d78aaf263c2ee86e61658b31a39",
-        "timestamp": "2026-04-25T14:03:58Z"
-      },
-      {
-        "version": "1.1.1.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.1.0/native-trickplay_1.1.1.0.zip",
-        "checksum": "c109373c4ea82d04daef8d0ccad28223",
-        "timestamp": "2026-04-25T13:57:19Z"
-      },
-      {
-        "version": "1.1.0.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.0.0/native-trickplay_1.1.0.0.zip",
-        "checksum": "4c96c5e79fe0b4ac1dbf49c77a4eece6",
-        "timestamp": "2026-04-25T13:50:04Z"
-      },
-      {
-        "version": "1.0.10.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.10.0/native-trickplay_1.0.10.0.zip",
-        "checksum": "6e36e22c26e4fd9eef45160662ff42d6",
-        "timestamp": "2026-04-25T13:36:52Z"
-      },
-      {
-        "version": "1.0.8.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.8.0/native-trickplay_1.0.8.0.zip",
-        "checksum": "762c26ca7c798b28d88a0093af2161ce",
-        "timestamp": "2026-04-25T06:57:46Z"
-      },
-      {
-        "version": "1.0.7.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.7.0/native-trickplay_1.0.7.0.zip",
-        "checksum": "4909156aa2a85183b044fc0297ce8261",
-        "timestamp": "2026-04-25T06:39:36Z"
-      },
-      {
-        "version": "1.0.6.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.6.0/native-trickplay_1.0.6.0.zip",
-        "checksum": "444ade5b6c97e9f952cff30a451e7bf1",
-        "timestamp": "2026-04-25T06:13:53Z"
-      },
-      {
-        "version": "1.0.5.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.5.0/native-trickplay_1.0.5.0.zip",
-        "checksum": "1ecc0062b19b64315f4d4934051b269e",
-        "timestamp": "2026-04-25T06:04:11Z"
-      },
-      {
-        "version": "1.0.4.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.4.0/native-trickplay_1.0.4.0.zip",
-        "checksum": "a88cbcdc6f0f273d0ecc6ca5f1df7797",
-        "timestamp": "2026-04-25T05:57:15Z"
-      },
-      {
-        "version": "1.0.3.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.3.0/native-trickplay_1.0.3.0.zip",
-        "checksum": "da9653166d7ee6718d2a79d0ceadd04a",
-        "timestamp": "2026-04-25T05:50:42Z"
-      },
-      {
-        "version": "1.0.2.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.2.0/native-trickplay_1.0.2.0.zip",
-        "checksum": "5f0a34498dcafa9c4d8a9c353cfd828a",
-        "timestamp": "2026-04-25T05:37:01Z"
-      },
-      {
-        "version": "1.0.1.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.1.0/native-trickplay_1.0.1.0.zip",
-        "checksum": "ccbfbbad247f087f4b578d058a48daf2",
-        "timestamp": "2026-04-25T05:08:20Z"
-      },
-      {
-        "version": "1.0.0.0",
-        "changelog": "Initial release.\n",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.0.0/native-trickplay_1.0.0.0.zip",
-        "checksum": "bf36e7aad3964defb1d77d60a04a4cb4",
-        "timestamp": "2026-04-25T04:25:31Z"
-      }
-    ]
-  }
+    {
+        "guid": "6911edf0-840d-4a71-965d-1319cbb2efd1",
+        "name": "Native Trickplay",
+        "description": "Generates HLS I-frame variants so Apple TV / AVPlayer clients get native\nscrubbing thumbnails on the transport bar \u2014 no client-side overlay needed.\nOne-time ffmpeg cost per item, then cached.\nIncludes a configurable daily prune scheduled task (orphan removal,\nage-based eviction, optional LRU size cap) so the cache doesn't grow\nunbounded.\n",
+        "overview": "Native HLS trickplay for AVPlayer-based clients (Apple TV).",
+        "owner": "harshlabsllc",
+        "category": "General",
+        "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
+        "versions": [
+            {
+                "version": "1.1.46.0",
+                "changelog": "* Search results above 200 items now load progressively. Default page is 500; 'Load more' appends the next batch and 'Load all' pulls everything matching the current filter.\n* New 'Select all N items matching this filter' link appears once you've checked some visible items in a paginated result. Click it to select every match \u2014 including items not yet rendered. The bulk Generate or Evict action then operates on the entire match set, not just the page in front of you.\n* Selection persists across pagination \u2014 checking an item on page 1 stays checked when you load page 2.\n* 'Clear selection' link in the banner dismisses an all-matching selection. Filter, sort, or search changes also reset selection automatically.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.46.0/native-trickplay_1.1.46.0.zip",
+                "checksum": "cb7ab76c2f3a1a73312d007723dd6442",
+                "timestamp": "2026-04-27T14:26:46Z"
+            },
+            {
+                "version": "1.1.45.0",
+                "changelog": "Cancel active encodings\n\n* New \"Cancel\" button on each in-flight row in the Encoding-in-progress panel, plus a \"Cancel all\" button in the footer.\n* Works for both queued items (waiting for an encoder slot) and items currently being encoded.\n* Existing cached trickplay for the canceled item is preserved \u2014 only the in-progress attempt is dropped.\n* Cancel is idempotent \u2014 a second click is harmless.\n\nRelease notes now reflect actual changes per release. Prior versions all showed \"Initial release\" due to a publishing oversight.",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.45.0/native-trickplay_1.1.45.0.zip",
+                "checksum": "017ecd66b29b3cedbb37520f21a7997d",
+                "timestamp": "2026-04-27T00:20:27Z"
+            },
+            {
+                "version": "1.1.44.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.44.0/native-trickplay_1.1.44.0.zip",
+                "checksum": "4c2f945b469fed111f0ea224ee3d634d",
+                "timestamp": "2026-04-26T19:19:57Z"
+            },
+            {
+                "version": "1.1.42.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.42.0/native-trickplay_1.1.42.0.zip",
+                "checksum": "7619e92bd715f9f806cf3e397451deeb",
+                "timestamp": "2026-04-26T18:00:27Z"
+            },
+            {
+                "version": "1.1.41.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.41.0/native-trickplay_1.1.41.0.zip",
+                "checksum": "9737b60e1ba213a1e67b3ba98346ab6f",
+                "timestamp": "2026-04-26T16:04:59Z"
+            },
+            {
+                "version": "1.1.40.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.40.0/native-trickplay_1.1.40.0.zip",
+                "checksum": "8f290d87ecac2ea5660b425173948fd2",
+                "timestamp": "2026-04-26T15:44:04Z"
+            },
+            {
+                "version": "1.1.39.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.39.0/native-trickplay_1.1.39.0.zip",
+                "checksum": "899d9c89c898286644988841eec10655",
+                "timestamp": "2026-04-26T15:37:22Z"
+            },
+            {
+                "version": "1.1.38.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.38.0/native-trickplay_1.1.38.0.zip",
+                "checksum": "6f2c4a5694bbb677a3282ad6756a2701",
+                "timestamp": "2026-04-26T15:16:48Z"
+            },
+            {
+                "version": "1.1.37.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.37.0/native-trickplay_1.1.37.0.zip",
+                "checksum": "a0c0b17854e2e3d9f654b8497ea62cc2",
+                "timestamp": "2026-04-26T15:11:05Z"
+            },
+            {
+                "version": "1.1.36.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.36.0/native-trickplay_1.1.36.0.zip",
+                "checksum": "24b6fe32a29359b64b0bce34d9813a71",
+                "timestamp": "2026-04-26T14:55:29Z"
+            },
+            {
+                "version": "1.1.35.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.35.0/native-trickplay_1.1.35.0.zip",
+                "checksum": "c6a489b95e3fd88d690fcd4795e7479b",
+                "timestamp": "2026-04-26T14:36:10Z"
+            },
+            {
+                "version": "1.1.34.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.34.0/native-trickplay_1.1.34.0.zip",
+                "checksum": "c3add2b666bcf2205a19aba48ce82ff2",
+                "timestamp": "2026-04-26T02:46:51Z"
+            },
+            {
+                "version": "1.1.33.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.33.0/native-trickplay_1.1.33.0.zip",
+                "checksum": "f84be54922f35a144cb0d66c88dd9913",
+                "timestamp": "2026-04-26T02:29:52Z"
+            },
+            {
+                "version": "1.1.32.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.32.0/native-trickplay_1.1.32.0.zip",
+                "checksum": "b876d73e4139fbfcc598217226935ff0",
+                "timestamp": "2026-04-25T23:37:30Z"
+            },
+            {
+                "version": "1.1.31.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.31.0/native-trickplay_1.1.31.0.zip",
+                "checksum": "7bd03cc9b4070501f978d76463b40b2a",
+                "timestamp": "2026-04-25T21:36:11Z"
+            },
+            {
+                "version": "1.1.30.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.30.0/native-trickplay_1.1.30.0.zip",
+                "checksum": "a5787e462555f9c502c489dec728dd5f",
+                "timestamp": "2026-04-25T21:26:11Z"
+            },
+            {
+                "version": "1.1.29.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.29.0/native-trickplay_1.1.29.0.zip",
+                "checksum": "df1203bf3016f892ce6cc2172297e758",
+                "timestamp": "2026-04-25T21:18:06Z"
+            },
+            {
+                "version": "1.1.28.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.28.0/native-trickplay_1.1.28.0.zip",
+                "checksum": "25bef037812598f602fe56a3c88cba60",
+                "timestamp": "2026-04-25T21:10:10Z"
+            },
+            {
+                "version": "1.1.27.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.27.0/native-trickplay_1.1.27.0.zip",
+                "checksum": "72dbff5107c039f109b51fbcb9ff5c4f",
+                "timestamp": "2026-04-25T20:51:02Z"
+            },
+            {
+                "version": "1.1.26.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.26.0/native-trickplay_1.1.26.0.zip",
+                "checksum": "ade1ec599ef5f18cd0f1b49778c52c31",
+                "timestamp": "2026-04-25T19:23:58Z"
+            },
+            {
+                "version": "1.1.25.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.25.0/native-trickplay_1.1.25.0.zip",
+                "checksum": "e429f8b043bc4584ad472f7cf9e92137",
+                "timestamp": "2026-04-25T19:01:02Z"
+            },
+            {
+                "version": "1.1.24.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.24.0/native-trickplay_1.1.24.0.zip",
+                "checksum": "9611a6b56794e30a1832c2d07eb225ac",
+                "timestamp": "2026-04-25T18:43:54Z"
+            },
+            {
+                "version": "1.1.23.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.23.0/native-trickplay_1.1.23.0.zip",
+                "checksum": "60361203468e08f26745260775f4fb5e",
+                "timestamp": "2026-04-25T18:33:22Z"
+            },
+            {
+                "version": "1.1.22.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.22.0/native-trickplay_1.1.22.0.zip",
+                "checksum": "e7daeacf942db9efad5c0a9ce1be3ef7",
+                "timestamp": "2026-04-25T18:31:36Z"
+            },
+            {
+                "version": "1.1.21.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.21.0/native-trickplay_1.1.21.0.zip",
+                "checksum": "39c749c0d91f014b4998be188cbfff51",
+                "timestamp": "2026-04-25T18:29:19Z"
+            },
+            {
+                "version": "1.1.20.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.20.0/native-trickplay_1.1.20.0.zip",
+                "checksum": "9ef7a08a11f4be894a0b243caf39e14e",
+                "timestamp": "2026-04-25T18:26:44Z"
+            },
+            {
+                "version": "1.1.19.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.19.0/native-trickplay_1.1.19.0.zip",
+                "checksum": "d660f84a8120832a210b1f766372ba12",
+                "timestamp": "2026-04-25T18:19:44Z"
+            },
+            {
+                "version": "1.1.18.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.18.0/native-trickplay_1.1.18.0.zip",
+                "checksum": "7039876bff02c368b44956ad2280d42f",
+                "timestamp": "2026-04-25T18:14:10Z"
+            },
+            {
+                "version": "1.1.17.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.17.0/native-trickplay_1.1.17.0.zip",
+                "checksum": "23fad14932a0b57d2208fe69f56fa9a9",
+                "timestamp": "2026-04-25T18:09:26Z"
+            },
+            {
+                "version": "1.1.16.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.16.0/native-trickplay_1.1.16.0.zip",
+                "checksum": "835a5f4aa0373adb01c254934db2516e",
+                "timestamp": "2026-04-25T18:05:12Z"
+            },
+            {
+                "version": "1.1.15.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.15.0/native-trickplay_1.1.15.0.zip",
+                "checksum": "678de74969f18d570bcc91a5ac73ae8e",
+                "timestamp": "2026-04-25T18:00:40Z"
+            },
+            {
+                "version": "1.1.14.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.14.0/native-trickplay_1.1.14.0.zip",
+                "checksum": "8859ebb4224e180a35bfb4381f4a1bc9",
+                "timestamp": "2026-04-25T17:53:33Z"
+            },
+            {
+                "version": "1.1.13.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.13.0/native-trickplay_1.1.13.0.zip",
+                "checksum": "fba6cbcd070d6f6c4e8a22210a6a9da3",
+                "timestamp": "2026-04-25T17:45:50Z"
+            },
+            {
+                "version": "1.1.12.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.12.0/native-trickplay_1.1.12.0.zip",
+                "checksum": "43aeb2b4e711e939653fb92936594691",
+                "timestamp": "2026-04-25T17:12:00Z"
+            },
+            {
+                "version": "1.1.9.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.9.0/native-trickplay_1.1.9.0.zip",
+                "checksum": "52ea44b438ace7d0f66fc37083494492",
+                "timestamp": "2026-04-25T16:33:36Z"
+            },
+            {
+                "version": "1.1.2.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.2.0/native-trickplay_1.1.2.0.zip",
+                "checksum": "9b6e0d78aaf263c2ee86e61658b31a39",
+                "timestamp": "2026-04-25T14:03:58Z"
+            },
+            {
+                "version": "1.1.1.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.1.0/native-trickplay_1.1.1.0.zip",
+                "checksum": "c109373c4ea82d04daef8d0ccad28223",
+                "timestamp": "2026-04-25T13:57:19Z"
+            },
+            {
+                "version": "1.1.0.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.0.0/native-trickplay_1.1.0.0.zip",
+                "checksum": "4c96c5e79fe0b4ac1dbf49c77a4eece6",
+                "timestamp": "2026-04-25T13:50:04Z"
+            },
+            {
+                "version": "1.0.10.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.10.0/native-trickplay_1.0.10.0.zip",
+                "checksum": "6e36e22c26e4fd9eef45160662ff42d6",
+                "timestamp": "2026-04-25T13:36:52Z"
+            },
+            {
+                "version": "1.0.8.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.8.0/native-trickplay_1.0.8.0.zip",
+                "checksum": "762c26ca7c798b28d88a0093af2161ce",
+                "timestamp": "2026-04-25T06:57:46Z"
+            },
+            {
+                "version": "1.0.7.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.7.0/native-trickplay_1.0.7.0.zip",
+                "checksum": "4909156aa2a85183b044fc0297ce8261",
+                "timestamp": "2026-04-25T06:39:36Z"
+            },
+            {
+                "version": "1.0.6.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.6.0/native-trickplay_1.0.6.0.zip",
+                "checksum": "444ade5b6c97e9f952cff30a451e7bf1",
+                "timestamp": "2026-04-25T06:13:53Z"
+            },
+            {
+                "version": "1.0.5.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.5.0/native-trickplay_1.0.5.0.zip",
+                "checksum": "1ecc0062b19b64315f4d4934051b269e",
+                "timestamp": "2026-04-25T06:04:11Z"
+            },
+            {
+                "version": "1.0.4.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.4.0/native-trickplay_1.0.4.0.zip",
+                "checksum": "a88cbcdc6f0f273d0ecc6ca5f1df7797",
+                "timestamp": "2026-04-25T05:57:15Z"
+            },
+            {
+                "version": "1.0.3.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.3.0/native-trickplay_1.0.3.0.zip",
+                "checksum": "da9653166d7ee6718d2a79d0ceadd04a",
+                "timestamp": "2026-04-25T05:50:42Z"
+            },
+            {
+                "version": "1.0.2.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.2.0/native-trickplay_1.0.2.0.zip",
+                "checksum": "5f0a34498dcafa9c4d8a9c353cfd828a",
+                "timestamp": "2026-04-25T05:37:01Z"
+            },
+            {
+                "version": "1.0.1.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.1.0/native-trickplay_1.0.1.0.zip",
+                "checksum": "ccbfbbad247f087f4b578d058a48daf2",
+                "timestamp": "2026-04-25T05:08:20Z"
+            },
+            {
+                "version": "1.0.0.0",
+                "changelog": "Initial release.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.0.0.0/native-trickplay_1.0.0.0.zip",
+                "checksum": "bf36e7aad3964defb1d77d60a04a4cb4",
+                "timestamp": "2026-04-25T04:25:31Z"
+            }
+        ]
+    }
 ]
