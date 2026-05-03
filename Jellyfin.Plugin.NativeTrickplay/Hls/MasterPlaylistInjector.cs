@@ -284,6 +284,20 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         var item = _libraryManager.GetItemById(itemId);
         if (item is null) return false;
 
+        // Cache cold: do NOT advertise an iframe variant. The IframeHlsController
+        // returns a valid-but-empty I-frames-only playlist on cache miss, which
+        // confuses some AVPlayer paths. Same rationale as TryWrapAsMaster's
+        // cache-cold check — returning false makes the caller pass the master
+        // through unchanged. Trickplay deferred to the next session after
+        // PlaybackWarmupService finishes generating the cache.
+        if (_cache.TryGetCached(itemId) is null)
+        {
+            _logger.LogInformation(
+                "[NativeTrickplay] TryAppendIframeVariant: iframe cache cold for {ItemId} — passing master.m3u8 through unchanged",
+                itemId);
+            return false;
+        }
+
         var variant = _cache.IframeFormatFor(item);
         // Look up source dimensions so the I-FRAME-STREAM-INF can declare an
         // accurate RESOLUTION matching what the encoder actually outputs.
@@ -373,6 +387,22 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             _logger.LogDebug(
                 "[NativeTrickplay] TryWrapAsMaster: skipping HDR/DV item {ItemId} (range={Range}) — client is expected to wrap",
                 itemId, video.VideoRangeType);
+            return false;
+        }
+
+        // Cache cold: do NOT wrap or advertise an iframe variant. The
+        // IframeHlsController returns a valid-but-empty I-frames-only
+        // playlist on cache miss, which AVPlayer on tvOS 26 doesn't
+        // gracefully fall back from in some seek-shifted ffmpeg scenarios.
+        // Passing main.m3u8 through unchanged is safer — once
+        // PlaybackWarmupService finishes generating the cache (T+30s,
+        // background), the next playback session sees a hot cache and
+        // gets the iframe variant for real trickplay.
+        if (_cache.TryGetCached(itemId) is null)
+        {
+            _logger.LogInformation(
+                "[NativeTrickplay] TryWrapAsMaster: iframe cache cold for {ItemId} — passing main.m3u8 through unchanged (trickplay deferred to next session after warmup completes)",
+                itemId);
             return false;
         }
 
