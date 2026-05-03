@@ -9,6 +9,14 @@
         "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
         "versions": [
             {
+                "version": "1.1.47.0",
+                "changelog": "Avoids advertising an iframe trickplay variant whose playlist resolves\nto a valid-but-empty stub on cache miss \u2014 that combination can stall\nAVPlayer on tvOS 26 with seek-shifted on-demand transcodes. Trickplay\nappears on the next playback session once the warmup task generates\nthe cache.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.47.0/native-trickplay_1.1.47.0.zip",
+                "checksum": "964c98b804c2586eecf37583f501bd87",
+                "timestamp": "2026-05-03T18:31:18Z"
+            },
+            {
                 "version": "1.1.46.0",
                 "changelog": "* Search results above 200 items now load progressively. Default page is 500; 'Load more' appends the next batch and 'Load all' pulls everything matching the current filter.\n* New 'Select all N items matching this filter' link appears once you've checked some visible items in a paginated result. Click it to select every match \u2014 including items not yet rendered. The bulk Generate or Evict action then operates on the entire match set, not just the page in front of you.\n* Selection persists across pagination \u2014 checking an item on page 1 stays checked when you load page 2.\n* 'Clear selection' link in the banner dismisses an all-matching selection. Filter, sort, or search changes also reset selection automatically.\n",
                 "targetAbi": "10.11.0.0",
