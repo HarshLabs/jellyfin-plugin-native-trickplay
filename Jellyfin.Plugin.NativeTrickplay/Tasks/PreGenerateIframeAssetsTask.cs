@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
@@ -59,6 +60,13 @@ public sealed class PreGenerateIframeAssetsTask : IScheduledTask
         }
 
         // Limit to actual playable video kinds. Skip virtual / placeholder items.
+        // AncestorIds restricts the recursive walk to items rooted at the
+        // *current* set of top-level libraries — without it, GetItemList
+        // returns every video row in Jellyfin's DB, including orphans whose
+        // parent library was removed from the dashboard but whose BaseItem
+        // rows haven't been pruned yet (Jellyfin only deletes them on the
+        // next ValidateTopLibraryFolders pass). Encoding those phantoms
+        // wastes CPU and disk on items that will never be played back.
         var query = new InternalItemsQuery
         {
             IncludeItemTypes = new[]
@@ -70,6 +78,8 @@ public sealed class PreGenerateIframeAssetsTask : IScheduledTask
             },
             Recursive = true,
             IsVirtualItem = false,
+            AncestorIds = _libraryManager.GetUserRootFolder().Children?
+                .OfType<Folder>().Select(f => f.Id).ToArray() ?? Array.Empty<Guid>(),
         };
 
         var items = _libraryManager.GetItemList(query);

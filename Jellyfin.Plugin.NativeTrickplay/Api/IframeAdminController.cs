@@ -162,7 +162,30 @@ public sealed class IframeAdminController : ControllerBase
             Recursive = true,
             IsVirtualItem = false,
         };
-        if (libraryId.HasValue && libraryId.Value != Guid.Empty) query.ParentId = libraryId.Value;
+        if (libraryId.HasValue && libraryId.Value != Guid.Empty)
+        {
+            query.ParentId = libraryId.Value;
+        }
+        else
+        {
+            // Restrict to items whose ancestor chain includes one of the
+            // *current* top-level libraries. Without this, GetItemList returns
+            // every video row in Jellyfin's DB — including orphans whose
+            // parent library was just removed from the dashboard but whose
+            // BaseItem rows haven't been pruned yet (Jellyfin only deletes
+            // them on the next library scan via ValidateTopLibraryFolders).
+            // Mirroring /Status's enumeration keeps the dashboard's "Find &
+            // select" total in sync with the Cache Status widget.
+            //
+            // AncestorIds (not TopParentIds) is the right primitive: it joins
+            // through the AncestorIds table, so it accepts the same library
+            // IDs /Status uses with ParentId. TopParentIds compares against a
+            // denormalized TopParentId column whose value is the persisted
+            // CollectionFolder row's GUID — not necessarily what
+            // GetUserRootFolder().Children yields here.
+            query.AncestorIds = _libraryManager.GetUserRootFolder().Children?
+                .OfType<Folder>().Select(f => f.Id).ToArray() ?? Array.Empty<Guid>();
+        }
 
         IEnumerable<BaseItem> items = _libraryManager.GetItemList(query);
 
