@@ -9,6 +9,14 @@
         "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
         "versions": [
             {
+                "version": "1.1.48.0",
+                "changelog": "Previously, if you deleted a library from Jellyfin, the plugin's\n\"Find & select items\" list and the daily pre-generation task kept\nseeing items from the removed library until Jellyfin's next library\nscan cleaned them up \u2014 which meant inflated totals on the dashboard\nand the nightly task wasting time encoding files that were no longer\nin any library.\n\nThe plugin now scopes its lookups to the libraries currently visible\nin Jellyfin, so the moment you remove a library the dashboard total\nmatches the Cache Status widget and the pre-gen task stops touching\nthose items.\n\nNo action required \u2014 just update the plugin and the next dashboard\nload will reflect the correct counts.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.48.0/native-trickplay_1.1.48.0.zip",
+                "checksum": "84c987deecfca98e9cd3d135ffee0544",
+                "timestamp": "2026-05-06T01:10:07Z"
+            },
+            {
                 "version": "1.1.47.0",
                 "changelog": "Avoids advertising an iframe trickplay variant whose playlist resolves\nto a valid-but-empty stub on cache miss \u2014 that combination can stall\nAVPlayer on tvOS 26 with seek-shifted on-demand transcodes. Trickplay\nappears on the next playback session once the warmup task generates\nthe cache.\n",
                 "targetAbi": "10.11.0.0",
