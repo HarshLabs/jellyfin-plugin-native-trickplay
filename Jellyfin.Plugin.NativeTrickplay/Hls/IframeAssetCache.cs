@@ -139,10 +139,31 @@ public sealed class IframeAssetCache
         public string? SourceProfile { get; set; }
         // Short tag for the decode hwaccel actually in use this run:
         // "QSV", "VAAPI", "CUDA", "VideoToolbox", "D3D11VA", or "SW".
+        // Suffixed with the GPU tone-map path ("+OCL", "+CUDA", "+VT") when
+        // active, e.g. "QSV+OCL" for Intel iGPU OpenCL-bridge tone-mapping.
         // Reset to "SW" on the software-decode retry path so the dashboard
         // accurately reflects which path each in-flight encode is taking.
         public string? HardwarePath { get; set; }
     }
+
+    /// <summary>
+    /// Which GPU tone-mapping path the current encode is using. Selected
+    /// from (hwaccel × OS × ffmpeg-filter availability) in
+    /// <see cref="SelectGpuTonemapPath"/>. <c>None</c> means CPU tone-mapping
+    /// via the zscale + tonemap=hable chain (current behaviour, pre-1.1.49).
+    /// </summary>
+    private enum GpuTonemapPath { None, OpenCL, Cuda, VideoToolbox }
+
+    /// <summary>
+    /// Which <c>tonemap_*</c> filters the host ffmpeg build ships with.
+    /// Probed once via <c>ffmpeg -filters</c> the first time an HDR encode
+    /// runs, then cached for the lifetime of the plugin process. Defaulted
+    /// to all-false on probe timeout / error — safer than over-eagerly
+    /// emitting flags the build can't honor.
+    /// </summary>
+    private sealed record GpuTonemapSupport(bool HasOpenCL, bool HasCuda, bool HasVideoToolbox);
+
+    private Task<GpuTonemapSupport>? _gpuTonemapSupportTask;
 
     public IframeAssetCache(
         ILogger<IframeAssetCache> logger,
@@ -827,27 +848,21 @@ public sealed class IframeAssetCache
             progress.SourceProfile = FormatSourceProfile(srcHeight, srcCodec, is10BitSource, isHdrSource);
         }
 
-        // First attempt: with hwaccel if configured.
-        var hwaccelArgs = new List<string>();
-        AppendHwaccelArgs(cfg, hwaccelArgs);
-        // Surface which decode path is in use this run. AppendHwaccelArgs
-        // emits "-hwaccel <name> ..." pairs starting at index 0; the decoder
-        // tag itself is at index 1. Empty list = software decode.
-        if (progress is not null)
+        // Decide whether to attempt GPU tone-mapping on the primary pass.
+        // Probe is lazy + cached: only the first HDR encode ever pays its
+        // ~100 ms cost. Skip the probe entirely when neither the source nor
+        // the config could use it (the common case for SDR content / users
+        // with hwaccel disabled).
+        var initialGpuPath = GpuTonemapPath.None;
+        if (isHdrSource && cfg.UseHardwareDecoding && cfg.EnableGpuTonemap)
         {
-            progress.HardwarePath = hwaccelArgs.Count >= 2
-                ? FormatHwPath(hwaccelArgs[1])
-                : "SW";
+            var hwType = TryGetHardwareAccelerationType(cfg);
+            if (hwType != HardwareAccelerationType.none)
+            {
+                var support = await GetGpuTonemapSupportAsync().ConfigureAwait(false);
+                initialGpuPath = SelectGpuTonemapPath(cfg, hwType, isHdrSource, support);
+            }
         }
-
-        var primaryArgs = BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs, isHdrSource, is10BitSource);
-        _logger.LogInformation(
-            "[NativeTrickplay] ffmpeg invoke (hwaccel={Hwaccel}, preset={Preset}, crf={Crf}, width={Width}, interval={Interval}s, sourceHdr={IsHdr}, source10bit={Is10Bit})",
-            hwaccelArgs.Count > 0 ? string.Join(' ', hwaccelArgs) : "none",
-            cfg.IframePreset, cfg.IframeCrf, cfg.IframeWidth, cfg.IframeIntervalSeconds, isHdrSource, is10BitSource);
-        _logger.LogDebug(
-            "[NativeTrickplay] ffmpeg cmd: {Encoder} {Args}",
-            _encoder.EncoderPath, string.Join(' ', primaryArgs));
 
         // ffmpeg's `-progress pipe:1` emits key=value lines every 0.5s. We
         // care about `out_time_us` — microseconds of source consumed so far —
@@ -877,41 +892,106 @@ public sealed class IframeAssetCache
             }
         };
 
-        try
-        {
-            await RunProcessAsync(_encoder.EncoderPath, primaryArgs, ct, stdoutLineCallback: onLine).ConfigureAwait(false);
-            return;
-        }
-        catch (InvalidOperationException ex)
-            when (hwaccelArgs.Count > 0 && IsLikelyHwaccelFailure(ex.Message))
-        {
-            // Recognizable hwaccel handoff failure (e.g. QSV+HEVC EBUSY,
-            // VAAPI auto_scale gap, "Failed to transfer data to output frame",
-            // "Invalid output format … for hwframe download" when a wrong
-            // bit-depth was probed). Retry once with software decode —
-            // ffmpeg can always handle the source if the GPU path is
-            // misbehaving for this specific codec.
-            _logger.LogWarning(
-                "[NativeTrickplay] hwaccel decode failed for {Input}, retrying with software decode.\nffmpeg stderr:\n{Stderr}",
-                inputPath,
-                TailLines(ex.Message, 12));
-        }
+        // Two-tier retry state machine.
+        //   tryGpuTonemap=true,  tryHwaccel=true  → primary attempt
+        //   tryGpuTonemap=false, tryHwaccel=true  → drop GPU tonemap only
+        //   tryGpuTonemap=false, tryHwaccel=false → software decode + CPU tonemap
+        // Failure classifier order is important: GPU-tonemap stderr patterns
+        // are checked first because some of them (e.g. "hwmap") would also
+        // match the broader hwaccel-failure heuristic.
+        var tryGpuTonemap = initialGpuPath != GpuTonemapPath.None;
+        var tryHwaccel = true;
+        var attemptIndex = 0;
 
-        // Reset progress before the software-decode retry so the dashboard
-        // doesn't briefly display stale "near 100%" from the failed attempt
-        // before the new run starts emitting fresh out_time_us values.
-        // Also flip HardwarePath to "SW" so the dashboard reflects the
-        // actual path the second-attempt encode is taking.
-        if (progress is not null)
+        while (true)
         {
-            progress.EncodedSourceMicros = 0;
-            progress.EncodingSpeed = null;
-            progress.HardwarePath = "SW";
-        }
+            var effectiveGpu = tryGpuTonemap ? initialGpuPath : GpuTonemapPath.None;
+            var hwArgs = new List<string>();
+            string? hwName = tryHwaccel ? AppendHwaccelArgs(cfg, hwArgs, effectiveGpu) : null;
 
-        await RunProcessAsync(_encoder.EncoderPath,
-            BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwaccelArgs: null, isHdrSource, is10BitSource), ct,
-            stdoutLineCallback: onLine).ConfigureAwait(false);
+            if (progress is not null)
+            {
+                if (attemptIndex > 0)
+                {
+                    // Reset progress between retries so the dashboard doesn't
+                    // briefly display stale "near 100%" from the failed run.
+                    progress.EncodedSourceMicros = 0;
+                    progress.EncodingSpeed = null;
+                }
+                progress.HardwarePath = hwName is null
+                    ? "SW"
+                    : FormatHwPath(hwName) + TonemapSuffix(effectiveGpu);
+            }
+
+            var args = BuildFfmpegArgs(cfg, inputPath, outputPath, variant, hwArgs, isHdrSource, is10BitSource, effectiveGpu);
+
+            if (attemptIndex == 0)
+            {
+                _logger.LogInformation(
+                    "[NativeTrickplay] ffmpeg invoke (hwaccel={Hwaccel}, tonemap={Tonemap}, preset={Preset}, crf={Crf}, width={Width}, interval={Interval}s, sourceHdr={IsHdr}, source10bit={Is10Bit})",
+                    hwName ?? "none", effectiveGpu,
+                    cfg.IframePreset, cfg.IframeCrf, cfg.IframeWidth, cfg.IframeIntervalSeconds, isHdrSource, is10BitSource);
+                _logger.LogDebug(
+                    "[NativeTrickplay] ffmpeg cmd: {Encoder} {Args}",
+                    _encoder.EncoderPath, string.Join(' ', args));
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "[NativeTrickplay] ffmpeg retry attempt {N} (hwaccel={Hwaccel}, tonemap={Tonemap})",
+                    attemptIndex + 1, hwName ?? "none", effectiveGpu);
+            }
+
+            try
+            {
+                await RunProcessAsync(_encoder.EncoderPath, args, ct, stdoutLineCallback: onLine).ConfigureAwait(false);
+                return;
+            }
+            catch (InvalidOperationException ex)
+            {
+                // GPU-tonemap failure → drop to CPU tonemap, keep hwaccel decode.
+                if (tryGpuTonemap && IsLikelyGpuTonemapFailure(ex.Message))
+                {
+                    _logger.LogWarning(
+                        "[NativeTrickplay] GPU tone-map failed for {Input}, retrying with CPU tone-map.\nffmpeg stderr:\n{Stderr}",
+                        inputPath, TailLines(ex.Message, 12));
+                    tryGpuTonemap = false;
+                    attemptIndex++;
+                    continue;
+                }
+
+                // Hwaccel-decode failure (from either pass) → drop to software decode.
+                // ffmpeg can always handle the source if the GPU path is
+                // misbehaving for this specific codec.
+                if (tryHwaccel && IsLikelyHwaccelFailure(ex.Message))
+                {
+                    _logger.LogWarning(
+                        "[NativeTrickplay] hwaccel decode failed for {Input}, retrying with software decode.\nffmpeg stderr:\n{Stderr}",
+                        inputPath, TailLines(ex.Message, 12));
+                    tryGpuTonemap = false;
+                    tryHwaccel = false;
+                    attemptIndex++;
+                    continue;
+                }
+
+                // Not a recoverable failure pattern (or we already exhausted
+                // every fallback above) — surface to the caller.
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns Jellyfin's configured hwaccel type, or
+    /// <see cref="HardwareAccelerationType.none"/> when hardware decoding is
+    /// disabled in the plugin config or when EncodingOptions can't be read.
+    /// Used only by the GPU-tonemap selector to short-circuit the probe.
+    /// </summary>
+    private HardwareAccelerationType TryGetHardwareAccelerationType(PluginConfiguration cfg)
+    {
+        if (!cfg.UseHardwareDecoding) return HardwareAccelerationType.none;
+        try { return _serverConfig.GetEncodingOptions().HardwareAccelerationType; }
+        catch { return HardwareAccelerationType.none; }
     }
 
     /// <summary>
@@ -1050,9 +1130,11 @@ public sealed class IframeAssetCache
     };
 
     private static List<string> BuildFfmpegArgs(
-        PluginConfiguration cfg, string inputPath, string outputPath, IframeVariant variant, IReadOnlyList<string>? hwaccelArgs, bool isHdrSource, bool is10BitSource)
+        PluginConfiguration cfg, string inputPath, string outputPath, IframeVariant variant,
+        IReadOnlyList<string>? hwaccelArgs, bool isHdrSource, bool is10BitSource,
+        GpuTonemapPath gpuPath)
     {
-        var args = new List<string>(48)
+        var args = new List<string>(56)
         {
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
             // Stream key=value progress lines to stdout every 0.5s so the
@@ -1067,31 +1149,6 @@ public sealed class IframeAssetCache
 
         // Hardware decode args go BEFORE -i.
         if (hwaccelArgs is { Count: > 0 }) args.AddRange(hwaccelArgs);
-
-        // Of the hwaccels we support, only QSV needs an explicit
-        // `hwdownload,format=<sw_format>` at the head of the filter chain.
-        // VideoToolbox / VAAPI / CUDA / D3D11VA all auto-transfer decoded
-        // frames to system memory by default (when no
-        // `-hwaccel_output_format` is set), so the CPU filter chain reads
-        // them directly. QSV's decoder is the outlier: it leaves frames
-        // in qsv-format on the GPU and the auto_scale filter ffmpeg tries
-        // to insert can't bridge them, producing:
-        //   "Impossible to convert between the formats supported by the
-        //    filter 'Parsed_fps_0' and the filter 'auto_scale_0'"
-        // hwdownload (with a probe-derived single sw_format — nv12 for
-        // 8-bit, p010le for 10-bit; alternation does NOT work) bridges
-        // QSV cleanly.
-        //
-        // Earlier versions of this plugin (v1.1.28–v1.1.32) added the
-        // hwdownload prefix to VAAPI / CUDA / D3D11VA as well. That was
-        // an over-generalization from a single QSV bug report and
-        // *broke* hardware decode for those users by attempting to
-        // "download" frames that were already on CPU — auto_scale then
-        // failed in the opposite direction. Reverted in v1.1.33 to
-        // match v1.1.25's working behavior for those three.
-        var needsHwdownload = hwaccelArgs is { Count: > 0 } && hwaccelArgs.Contains("qsv");
-        var hwSwFormat = is10BitSource ? "p010le" : "nv12";
-        var hwdownloadPrefix = needsHwdownload ? $"hwdownload,format={hwSwFormat}," : string.Empty;
 
         var width = cfg.IframeWidth.ToString(CultureInfo.InvariantCulture);
         var interval = cfg.IframeIntervalSeconds <= 0 ? 1.0 : cfg.IframeIntervalSeconds;
@@ -1135,29 +1192,106 @@ public sealed class IframeAssetCache
         // (manifesting as "thumbnail only at the current playhead" for HDR
         // primaries — exactly the symptom v1.1.6 still had).
         //
-        // For HDR sources: zscale + tonemap chain converts BT.2020/PQ→BT.709
-        // with the Hable operator. For SDR sources: this chain throws "no path
-        // between colorspaces" because the linear-light intermediate (npl=100)
-        // is only defined for PQ-curve input. Branching is mandatory; the
-        // chain is NOT safe to apply unconditionally despite earlier intuition
-        // (v1.1.8 broke every SDR encode in the library).
+        // Filter chain construction — three families, ordered by GPU pressure
+        // off-loaded from the CPU:
         //
-        // The fps filter thins the decoded stream to 1/interval Hz before the
-        // encoder sees it, so trickplay density is uniform regardless of the
-        // source's GOP layout. x264's keyint=1 then makes every (thinned)
-        // output frame an IDR. Unlike x265, x264 honors keyint=1 cleanly
-        // without flipping into a profile Apple decoders reject.
-        var filterChain = isHdrSource
-            ? hwdownloadPrefix +
-              $"fps={fps}," +
-              "zscale=t=linear:npl=100," +
-              "format=gbrpf32le," +
-              "zscale=p=bt709," +
-              "tonemap=tonemap=hable:desat=0," +
-              "zscale=t=bt709:m=bt709:r=tv," +
-              "format=yuv420p," +
-              $"scale=-2:{width}"
-            : hwdownloadPrefix + $"fps={fps},scale=-2:{width},format=yuv420p";
+        //   * gpuPath != None: GPU tone-mapping. Frames stay on the device
+        //     (decode hwaccel + matching -hwaccel_output_format in
+        //     AppendHwaccelArgs) until tonemap_{opencl,cuda,videotoolbox}
+        //     converts BT.2020/PQ → BT.709 SDR. fps thinning runs ON THE
+        //     HARDWARE frames (timestamps only — no pixel work) so we don't
+        //     pay GPU→CPU transfer for the 99%+ of frames the trickplay
+        //     thumbnail won't keep. This is the path that got the reporting
+        //     user from 90 min to ~10 min on a 2-hour 4K HDR film.
+        //
+        //   * gpuPath == None + isHdrSource: CPU tone-mapping via the
+        //     zscale + tonemap=hable chain. Used when GPU tone-mapping is
+        //     disabled, not supported, or has fallen back on retry. fps
+        //     STILL leads the chain so the QSV hwdownload (only hwaccel
+        //     that requires an explicit download for the CPU filter chain)
+        //     transfers thinned frames, not every decoded frame.
+        //
+        //   * gpuPath == None + SDR: simple fps + scale chain.
+        //
+        // The fps filter thins the decoded stream to 1/interval Hz before
+        // the encoder sees it, so trickplay density is uniform regardless
+        // of the source's GOP layout. x264's keyint=1 then makes every
+        // (thinned) output frame an IDR. Unlike x265, x264 honors keyint=1
+        // cleanly without flipping into a profile Apple decoders reject.
+        //
+        // Note: only the QSV CPU-tonemap path needs explicit hwdownload;
+        // VideoToolbox / VAAPI / CUDA / D3D11VA auto-transfer decoded
+        // frames to system memory when -hwaccel_output_format is not set,
+        // which it isn't on the CPU-tonemap path (see AppendHwaccelArgs).
+        // Earlier plugin versions (v1.1.28–v1.1.32) over-generalised the
+        // hwdownload prefix to non-QSV hwaccels and broke their decode by
+        // "downloading" frames already on CPU. Reverted in v1.1.33.
+        var qsvCpuTonemap = gpuPath == GpuTonemapPath.None
+            && hwaccelArgs is { Count: > 0 } && hwaccelArgs.Contains("qsv");
+        var hwSwFormat = is10BitSource ? "p010le" : "nv12";
+        var hwdownloadPrefix = qsvCpuTonemap ? $"hwdownload,format={hwSwFormat}," : string.Empty;
+
+        string filterChain;
+        if (gpuPath == GpuTonemapPath.OpenCL)
+        {
+            // QSV / VAAPI / AMF / rkmpp via OpenCL tone-map bridge.
+            // hwmap=derive_device transitions the hwframe context to OpenCL
+            // for the tonemap kernel; tonemap_opencl outputs nv12 BT.709 SDR
+            // directly. hwdownload pulls the tonemapped (already-thinned)
+            // frames to system memory for libx264.
+            filterChain =
+                $"fps={fps}," +
+                "hwmap=derive_device=opencl,format=opencl," +
+                "tonemap_opencl=tonemap=hable:format=nv12," +
+                "hwdownload,format=nv12," +
+                $"scale=-2:{width},format=yuv420p";
+        }
+        else if (gpuPath == GpuTonemapPath.Cuda)
+        {
+            // NVIDIA via native tonemap_cuda — no OpenCL bridge needed since
+            // the filter operates on CUDA frames directly.
+            filterChain =
+                $"fps={fps}," +
+                "tonemap_cuda=tonemap=hable:format=nv12," +
+                "hwdownload,format=nv12," +
+                $"scale=-2:{width},format=yuv420p";
+        }
+        else if (gpuPath == GpuTonemapPath.VideoToolbox)
+        {
+            // macOS Metal-backed tonemap_videotoolbox. Picks up the VT
+            // device automatically from the input frame's hwframe context.
+            filterChain =
+                $"fps={fps}," +
+                "tonemap_videotoolbox=tonemap=hable:format=nv12," +
+                "hwdownload,format=nv12," +
+                $"scale=-2:{width},format=yuv420p";
+        }
+        else if (isHdrSource)
+        {
+            // CPU tone-map fallback. Identical operator chain to the pre-
+            // 1.1.49 code, with fps lifted to the head so QSV's hwdownload
+            // (which only appears here in the QSV CPU-tonemap case) does
+            // not transfer every decoded frame.
+            filterChain =
+                $"fps={fps}," +
+                hwdownloadPrefix +
+                "zscale=t=linear:npl=100," +
+                "format=gbrpf32le," +
+                "zscale=p=bt709," +
+                "tonemap=tonemap=hable:desat=0," +
+                "zscale=t=bt709:m=bt709:r=tv," +
+                "format=yuv420p," +
+                $"scale=-2:{width}";
+        }
+        else
+        {
+            // SDR — no tone-mapping work needed. fps first; QSV CPU path
+            // (rare in SDR but possible) gets its hwdownload prefix.
+            filterChain =
+                $"fps={fps}," +
+                hwdownloadPrefix +
+                $"scale=-2:{width},format=yuv420p";
+        }
         // x264-params color overrides are required: ffmpeg's -color_* output
         // flags set the AVStream metadata but x264 only embeds primaries /
         // transfer / matrix into the H.264 VUI when its own params are given
@@ -1229,6 +1363,34 @@ public sealed class IframeAssetCache
             || stderr.Contains("hwframe", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Heuristic: does the ffmpeg stderr look like a GPU tone-map filter
+    /// failure (rather than a deeper hwaccel-decode failure)? When true,
+    /// the retry drops only the GPU tone-map step and keeps hwaccel decode —
+    /// this is the cheaper fallback. Must be checked BEFORE
+    /// <see cref="IsLikelyHwaccelFailure"/> in the retry classifier so
+    /// generic substrings like "hwframe" don't mis-route a tone-map failure
+    /// to the slower software-decode retry.
+    /// </summary>
+    private static bool IsLikelyGpuTonemapFailure(string stderr)
+    {
+        return stderr.Contains("tonemap_opencl", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("tonemap_cuda", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("tonemap_videotoolbox", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("OpenCL", StringComparison.OrdinalIgnoreCase)
+            // Common OpenCL init / interop failure patterns:
+            || stderr.Contains("Failed to create OpenCL context", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("Failed to derive device", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("cl_get_platforms", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("Failed to init HW filter", StringComparison.OrdinalIgnoreCase)
+            // hwmap is the QSV/VAAPI→OpenCL bridge filter — its failures are
+            // tone-map-pipeline failures rather than decode failures.
+            || stderr.Contains("hwmap", StringComparison.OrdinalIgnoreCase)
+            // CUDA-specific init/alloc patterns:
+            || stderr.Contains("cuMemAlloc", StringComparison.Ordinal)
+            || stderr.Contains("Could not load CUDA", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string FirstLine(string s)
     {
         var idx = s.IndexOf('\n');
@@ -1256,23 +1418,45 @@ public sealed class IframeAssetCache
         return string.Join('\n', keep);
     }
 
-    private void AppendHwaccelArgs(PluginConfiguration cfg, List<string> args)
+    /// <summary>
+    /// Emit the `-hwaccel ...` (and, when GPU tone-mapping is active, the
+    /// `-init_hw_device ... -filter_hw_device ... -hwaccel_output_format ...`)
+    /// flags ahead of `-i`. Returns the canonical ffmpeg decoder name actually
+    /// used (e.g. "qsv", "vaapi", "cuda", "d3d11va", "videotoolbox", "rkmpp",
+    /// "drm") so the caller can render an accurate dashboard label, or null
+    /// when no hwaccel was wired up.
+    /// </summary>
+    private string? AppendHwaccelArgs(PluginConfiguration cfg, List<string> args, GpuTonemapPath gpuPath)
     {
-        if (!cfg.UseHardwareDecoding) return;
+        if (!cfg.UseHardwareDecoding) return null;
 
         EncodingOptions opts;
         try { opts = _serverConfig.GetEncodingOptions(); }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[NativeTrickplay] could not read EncodingOptions, falling back to software decode");
-            return;
+            return null;
         }
+
+        // VAAPI device path used for both VAAPI itself and as the base device
+        // for the Linux QSV→OpenCL bridge. Jellyfin's own fallback ladder is
+        // mirrored here: VaapiDevice → QsvDevice → /dev/dri/renderD128.
+        var vaapiPath = !string.IsNullOrEmpty(opts.VaapiDevice) ? opts.VaapiDevice
+                       : !string.IsNullOrEmpty(opts.QsvDevice) ? opts.QsvDevice
+                       : "/dev/dri/renderD128";
 
         // Map Jellyfin's HardwareAccelerationType enum to the corresponding ffmpeg
         // -hwaccel decoder. NVENC/AMF are encoder names, not decoders — for those
         // we map to the matching decode-side hwaccel that the same GPU exposes.
         // Per-hwaccel refinements mirror Jellyfin's own EncodingHelper.GetHwaccelType
         // (MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs).
+        //
+        // When gpuPath != None, we also emit the device-init chain that lets the
+        // filter graph keep frames on-device through the tone-mapper (avoiding a
+        // round-trip to CPU between decode and tone-map). The exact incantation
+        // is OS- and hwaccel-specific — see the table in plan
+        // robust-wondering-hollerith.md and Jellyfin's EncodingHelper for the
+        // device-alias conventions (va / hw / ocl / d3d / cu).
         switch (opts.HardwareAccelerationType)
         {
             case HardwareAccelerationType.videotoolbox:
@@ -1280,37 +1464,66 @@ public sealed class IframeAssetCache
                 // Trickplay extraction is background work — yield GPU time to
                 // foreground playback transcodes. Supported in jellyfin-ffmpeg 7.x.
                 args.Add("-hwaccel_flags"); args.Add("+low_priority");
-                break;
+                if (gpuPath == GpuTonemapPath.VideoToolbox)
+                {
+                    // Keep decoded frames on the VideoToolbox device so
+                    // tonemap_videotoolbox can read them directly via the
+                    // input frame's hwframe context. The filter picks up the
+                    // VT device automatically — no -filter_hw_device needed.
+                    args.Add("-hwaccel_output_format"); args.Add("videotoolbox_vld");
+                }
+                return "videotoolbox";
+
             case HardwareAccelerationType.qsv:
-                args.Add("-hwaccel"); args.Add("qsv");
-                if (!string.IsNullOrEmpty(opts.QsvDevice))
+                if (gpuPath == GpuTonemapPath.OpenCL)
                 {
-                    args.Add("-qsv_device"); args.Add(opts.QsvDevice);
+                    // Bridge QSV → OpenCL for tonemap_opencl. On Linux the
+                    // intermediate is VAAPI (shared drm render node); on
+                    // Windows it's D3D11VA (shared adapter). Both vendors
+                    // (Intel iGPU primarily) expose OpenCL interop on the
+                    // same underlying device, so the hwmap=derive in the
+                    // filter chain is zero-copy.
+                    if (OperatingSystem.IsWindows())
+                    {
+                        args.Add("-init_hw_device"); args.Add("d3d11va=d3d:0");
+                        args.Add("-init_hw_device"); args.Add("qsv=hw@d3d");
+                        args.Add("-init_hw_device"); args.Add("opencl=ocl@d3d");
+                    }
+                    else
+                    {
+                        args.Add("-init_hw_device"); args.Add($"vaapi=va:{vaapiPath}");
+                        args.Add("-init_hw_device"); args.Add("qsv=hw@va");
+                        args.Add("-init_hw_device"); args.Add("opencl=ocl@va");
+                    }
+                    args.Add("-filter_hw_device"); args.Add("ocl");
+                    args.Add("-hwaccel"); args.Add("qsv");
+                    args.Add("-hwaccel_output_format"); args.Add("qsv");
                 }
-                break;
+                else
+                {
+                    args.Add("-hwaccel"); args.Add("qsv");
+                    if (!string.IsNullOrEmpty(opts.QsvDevice))
+                    {
+                        args.Add("-qsv_device"); args.Add(opts.QsvDevice);
+                    }
+                }
+                return "qsv";
+
             case HardwareAccelerationType.vaapi:
-                args.Add("-hwaccel"); args.Add("vaapi");
-                if (!string.IsNullOrEmpty(opts.VaapiDevice))
+                if (gpuPath == GpuTonemapPath.OpenCL)
                 {
-                    args.Add("-vaapi_device"); args.Add(opts.VaapiDevice);
+                    // tonemap_vaapi is the VPP-based filter that does NOT
+                    // work on Intel iGPUs that lack VPP tone-mapping support
+                    // (see the reported case). tonemap_opencl bridges via
+                    // OpenCL interop instead — Mesa supports this on AMD
+                    // too, so this is the portable choice.
+                    args.Add("-init_hw_device"); args.Add($"vaapi=va:{vaapiPath}");
+                    args.Add("-init_hw_device"); args.Add("opencl=ocl@va");
+                    args.Add("-filter_hw_device"); args.Add("ocl");
+                    args.Add("-hwaccel"); args.Add("vaapi");
+                    args.Add("-hwaccel_output_format"); args.Add("vaapi");
                 }
-                break;
-            case HardwareAccelerationType.nvenc:
-                // NVENC is the NVIDIA encoder; the matching decode hwaccel is `cuda`.
-                // nvdec is single-threaded internally — ffmpeg's auto-thread heuristic
-                // oversubscribes if we don't pin to 1.
-                args.Add("-hwaccel"); args.Add("cuda");
-                args.Add("-threads"); args.Add("1");
-                break;
-            case HardwareAccelerationType.amf:
-                // AMF is AMD's encode framework; AMD decode in ffmpeg is platform-specific:
-                // d3d11va on Windows, vaapi on Linux (via Mesa's amdgpu driver).
-                if (OperatingSystem.IsWindows())
-                {
-                    args.Add("-hwaccel"); args.Add("d3d11va");
-                    args.Add("-threads"); args.Add("2");
-                }
-                else if (OperatingSystem.IsLinux())
+                else
                 {
                     args.Add("-hwaccel"); args.Add("vaapi");
                     if (!string.IsNullOrEmpty(opts.VaapiDevice))
@@ -1318,21 +1531,180 @@ public sealed class IframeAssetCache
                         args.Add("-vaapi_device"); args.Add(opts.VaapiDevice);
                     }
                 }
+                return "vaapi";
+
+            case HardwareAccelerationType.nvenc:
+                // NVENC is the NVIDIA encoder; the matching decode hwaccel is `cuda`.
+                // nvdec is single-threaded internally — ffmpeg's auto-thread heuristic
+                // oversubscribes if we don't pin to 1.
+                args.Add("-hwaccel"); args.Add("cuda");
+                args.Add("-threads"); args.Add("1");
+                if (gpuPath == GpuTonemapPath.Cuda)
+                {
+                    // Keep decoded frames on the CUDA device so tonemap_cuda
+                    // (native CUDA, no OpenCL bridge needed) can read them
+                    // directly. No -filter_hw_device — tonemap_cuda picks up
+                    // the device from the input hwframe context.
+                    args.Add("-hwaccel_output_format"); args.Add("cuda");
+                }
+                return "cuda";
+
+            case HardwareAccelerationType.amf:
+                // AMF is AMD's encode framework; AMD decode in ffmpeg is platform-specific:
+                // d3d11va on Windows, vaapi on Linux (via Mesa's amdgpu driver).
+                if (OperatingSystem.IsWindows())
+                {
+                    if (gpuPath == GpuTonemapPath.OpenCL)
+                    {
+                        args.Add("-init_hw_device"); args.Add("d3d11va=d3d:0");
+                        args.Add("-init_hw_device"); args.Add("opencl=ocl@d3d");
+                        args.Add("-filter_hw_device"); args.Add("ocl");
+                        args.Add("-hwaccel"); args.Add("d3d11va");
+                        args.Add("-hwaccel_output_format"); args.Add("d3d11");
+                    }
+                    else
+                    {
+                        args.Add("-hwaccel"); args.Add("d3d11va");
+                        args.Add("-threads"); args.Add("2");
+                    }
+                    return "d3d11va";
+                }
+                if (OperatingSystem.IsLinux())
+                {
+                    if (gpuPath == GpuTonemapPath.OpenCL)
+                    {
+                        args.Add("-init_hw_device"); args.Add($"vaapi=va:{vaapiPath}");
+                        args.Add("-init_hw_device"); args.Add("opencl=ocl@va");
+                        args.Add("-filter_hw_device"); args.Add("ocl");
+                        args.Add("-hwaccel"); args.Add("vaapi");
+                        args.Add("-hwaccel_output_format"); args.Add("vaapi");
+                    }
+                    else
+                    {
+                        args.Add("-hwaccel"); args.Add("vaapi");
+                        if (!string.IsNullOrEmpty(opts.VaapiDevice))
+                        {
+                            args.Add("-vaapi_device"); args.Add(opts.VaapiDevice);
+                        }
+                    }
+                    return "vaapi";
+                }
                 // macOS doesn't host AMD-specific hwaccel; fall through to software.
-                break;
+                return null;
+
             case HardwareAccelerationType.v4l2m2m:
                 // Used on embedded ARM Linux boards (Raspberry Pi, etc.). The DRM hwaccel
-                // is the standard pipeline.
+                // is the standard pipeline. No GPU tone-map filter is reliably available
+                // for this combo, so we never emit the device-init chain here.
                 args.Add("-hwaccel"); args.Add("drm");
-                break;
+                return "drm";
+
             case HardwareAccelerationType.rkmpp:
-                args.Add("-hwaccel"); args.Add("rkmpp");
-                break;
+                if (gpuPath == GpuTonemapPath.OpenCL)
+                {
+                    // Rockchip Mali OpenCL: init OpenCL standalone (no
+                    // derived-from-rkmpp interop exists). The hwmap in the
+                    // filter chain transfers via the drm_prime intermediate.
+                    args.Add("-init_hw_device"); args.Add("opencl=ocl");
+                    args.Add("-filter_hw_device"); args.Add("ocl");
+                    args.Add("-hwaccel"); args.Add("rkmpp");
+                    args.Add("-hwaccel_output_format"); args.Add("drm_prime");
+                }
+                else
+                {
+                    args.Add("-hwaccel"); args.Add("rkmpp");
+                }
+                return "rkmpp";
+
             case HardwareAccelerationType.none:
             default:
-                break;
+                return null;
         }
     }
+
+    /// <summary>
+    /// Choose the best GPU tone-mapping path for this encode based on the
+    /// configured hwaccel, the host OS, and which <c>tonemap_*</c> filters
+    /// the ffmpeg build ships with. Returns <c>None</c> if any precondition
+    /// fails — the caller then uses the CPU tone-map chain (current
+    /// behaviour, fps-reordered).
+    /// </summary>
+    private static GpuTonemapPath SelectGpuTonemapPath(
+        PluginConfiguration cfg,
+        HardwareAccelerationType hwaccel,
+        bool isHdrSource,
+        GpuTonemapSupport support)
+    {
+        if (!cfg.UseHardwareDecoding) return GpuTonemapPath.None;
+        if (!cfg.EnableGpuTonemap) return GpuTonemapPath.None;
+        if (!isHdrSource) return GpuTonemapPath.None;
+
+        return hwaccel switch
+        {
+            HardwareAccelerationType.qsv => support.HasOpenCL ? GpuTonemapPath.OpenCL : GpuTonemapPath.None,
+            HardwareAccelerationType.vaapi => support.HasOpenCL ? GpuTonemapPath.OpenCL : GpuTonemapPath.None,
+            HardwareAccelerationType.nvenc => support.HasCuda ? GpuTonemapPath.Cuda : GpuTonemapPath.None,
+            HardwareAccelerationType.amf => support.HasOpenCL ? GpuTonemapPath.OpenCL : GpuTonemapPath.None,
+            HardwareAccelerationType.videotoolbox => support.HasVideoToolbox ? GpuTonemapPath.VideoToolbox : GpuTonemapPath.None,
+            HardwareAccelerationType.rkmpp => support.HasOpenCL ? GpuTonemapPath.OpenCL : GpuTonemapPath.None,
+            _ => GpuTonemapPath.None,
+        };
+    }
+
+    /// <summary>
+    /// Lazy single-shot probe of <c>ffmpeg -filters</c> output, caching the
+    /// set of GPU tone-map filters the build supports. Subsequent callers
+    /// share the same Task; the probe itself is bounded to 5s and falls
+    /// back to "no GPU support" on timeout, non-zero exit, or any exception.
+    /// </summary>
+    private Task<GpuTonemapSupport> GetGpuTonemapSupportAsync()
+    {
+        var existing = Volatile.Read(ref _gpuTonemapSupportTask);
+        if (existing is not null) return existing;
+        var fresh = ProbeGpuTonemapSupportAsync();
+        var prior = Interlocked.CompareExchange(ref _gpuTonemapSupportTask, fresh, null);
+        return prior ?? fresh;
+    }
+
+    private async Task<GpuTonemapSupport> ProbeGpuTonemapSupportAsync()
+    {
+        try
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.ApplicationStopping);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+            var stdout = await RunProcessAsync(
+                _encoder.EncoderPath,
+                new[] { "-hide_banner", "-filters" },
+                timeoutCts.Token,
+                captureStdout: true).ConfigureAwait(false);
+            var hasOpenCL = stdout.Contains("tonemap_opencl", StringComparison.Ordinal);
+            var hasCuda = stdout.Contains("tonemap_cuda", StringComparison.Ordinal);
+            var hasVt = stdout.Contains("tonemap_videotoolbox", StringComparison.Ordinal);
+            _logger.LogInformation(
+                "[NativeTrickplay] GPU tone-map probe: opencl={OCL} cuda={Cuda} videotoolbox={VT}",
+                hasOpenCL, hasCuda, hasVt);
+            return new GpuTonemapSupport(hasOpenCL, hasCuda, hasVt);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[NativeTrickplay] GPU tone-map probe failed; assuming no GPU tone-map support");
+            return new GpuTonemapSupport(false, false, false);
+        }
+    }
+
+    /// <summary>
+    /// Dashboard tag suffix for an active GPU tone-map path. Empty string
+    /// for None, so concatenation against the decode-path label yields a
+    /// clean "QSV" / "QSV+OCL" / "CUDA+CUDA" pattern.
+    /// </summary>
+    private static string TonemapSuffix(GpuTonemapPath path) => path switch
+    {
+        GpuTonemapPath.OpenCL => "+OCL",
+        GpuTonemapPath.Cuda => "+CUDA",
+        GpuTonemapPath.VideoToolbox => "+VT",
+        _ => string.Empty,
+    };
 
     private async Task<IReadOnlyList<double>> ProbePtsDeltasAsync(string filePath, int expectedCount, CancellationToken ct)
     {
