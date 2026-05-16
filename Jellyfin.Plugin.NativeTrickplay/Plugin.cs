@@ -64,6 +64,18 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool UseHardwareDecoding { get; set; } = true;
 
     /// <summary>
+    /// When true (default), uses GPU tone-mapping for HDR sources whenever
+    /// the host ffmpeg build + selected hwaccel combination supports it
+    /// (tonemap_opencl bridge for QSV/VAAPI/AMF/rkmpp, tonemap_cuda for
+    /// NVENC, tonemap_videotoolbox on macOS). Falls back to CPU tone-mapping
+    /// automatically when the required filter is missing or filter-init
+    /// fails at runtime. Disable if GPU tone-mapping misbehaves on your
+    /// hardware — encodes still benefit from the fps-reorder optimization.
+    /// No effect on SDR sources or when UseHardwareDecoding is false.
+    /// </summary>
+    public bool EnableGpuTonemap { get; set; } = true;
+
+    /// <summary>
     /// Absolute filesystem path where iframe assets are stored. Empty = use
     /// Jellyfin's default cache directory. Useful for putting the cache on a
     /// larger / faster / dedicated drive. The plugin doesn't migrate existing

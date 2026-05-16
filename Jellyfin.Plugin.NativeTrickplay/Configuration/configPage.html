@@ -662,6 +662,14 @@
                             <label class="ntp-toggle"><input id="UseHardwareDecoding" type="checkbox" /><span class="ntp-toggle-slider"></span></label>
                         </div>
 
+                        <div class="ntp-form-row toggle">
+                            <div class="ntp-label">
+                                <span class="ntp-label-name">GPU tone-mapping for HDR</span>
+                                <span class="ntp-label-help">Runs HDR→SDR tone-mapping on the GPU (<code>tonemap_opencl</code> for QSV/VAAPI/AMF/rkmpp, <code>tonemap_cuda</code> for NVIDIA, <code>tonemap_videotoolbox</code> on macOS) instead of the CPU <code>zscale + tonemap=hable</code> chain. Major speedup on HDR sources (frequently 5–10×). Auto-detects support via <code>ffmpeg -filters</code> at startup and falls back to CPU tone-mapping on any filter-init failure. Disable if GPU tone-mapping misbehaves on your hardware. No effect on SDR sources.</span>
+                            </div>
+                            <label class="ntp-toggle"><input id="EnableGpuTonemap" type="checkbox" /><span class="ntp-toggle-slider"></span></label>
+                        </div>
+
                         <div class="ntp-form-row">
                             <div class="ntp-label">
                                 <span class="ntp-label-name">Thumbnail height</span>
@@ -920,6 +928,7 @@
                 document.querySelector('#ResumeInterruptedEncodesOnStartup').checked = cfg.ResumeInterruptedEncodesOnStartup !== false;
                 document.querySelector('#EncodeOnLibraryAdd').checked = !!cfg.EncodeOnLibraryAdd;
                 document.querySelector('#UseHardwareDecoding').checked = cfg.UseHardwareDecoding;
+                document.querySelector('#EnableGpuTonemap').checked = cfg.EnableGpuTonemap !== false;
                 document.querySelector('#CacheDirectory').value = cfg.CacheDirectory || '';
                 document.querySelector('#PruneOrphans').checked = cfg.PruneOrphans;
                 document.querySelector('#MaxAgeDays').value = cfg.MaxAgeDays;
@@ -953,6 +962,7 @@
                 cfg.ResumeInterruptedEncodesOnStartup = document.querySelector('#ResumeInterruptedEncodesOnStartup').checked;
                 cfg.EncodeOnLibraryAdd = document.querySelector('#EncodeOnLibraryAdd').checked;
                 cfg.UseHardwareDecoding = document.querySelector('#UseHardwareDecoding').checked;
+                cfg.EnableGpuTonemap = document.querySelector('#EnableGpuTonemap').checked;
                 cfg.CacheDirectory = (document.querySelector('#CacheDirectory').value || '').trim();
                 cfg.PruneOrphans = document.querySelector('#PruneOrphans').checked;
                 cfg.MaxAgeDays = parseInt(document.querySelector('#MaxAgeDays').value, 10);
