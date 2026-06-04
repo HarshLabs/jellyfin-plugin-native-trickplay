@@ -9,6 +9,14 @@
         "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
         "versions": [
             {
+                "version": "1.1.50.0",
+                "changelog": "Fixed playback breaking on SDR variable-bitrate files when trickplay is enabled. Affected videos could freeze mid-playback or get stuck on a loading screen when resumed; they now play normally.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.50.0/native-trickplay_1.1.50.0.zip",
+                "checksum": "19265cff5a3ce6bcee86b99f380634ec",
+                "timestamp": "2026-06-04T03:19:42Z"
+            },
+            {
                 "version": "1.1.49.0",
                 "changelog": "* On HDR sources, tone mapping now runs on the GPU when your ffmpeg build supports it (OpenCL for Intel QSV / VAAPI / AMD on Linux, CUDA for NVIDIA, Metal on macOS). The previous CPU tone-mapping path was the dominant cost on HDR content \u2014 moving it to the GPU is the bulk of the speedup. Falls back to the old CPU path automatically when no GPU tone-mapping filter is available.\n\n* The ffmpeg filter chain now thins frames down to the trickplay rate (one every couple of seconds) before any per-frame work runs. Previously every decoded frame was transferred GPU \u2192 CPU before being discarded \u2014 for a 2-hour 4K HDR source that's hundreds of thousands of wasted full-resolution transfers.\n\n* New \"GPU tone-mapping for HDR\" toggle in the plugin settings, on by default. Disable it if GPU tone-mapping misbehaves on your hardware \u2014 encodes still benefit from the filter-chain reorder.\n\n* Encodes that hit a GPU tone-mapping issue now fall back to CPU tone-mapping automatically (keeping hardware decode), and only drop to full software decode if the hardware decoder itself fails. The dashboard's hardware-path column shows what's actually in use (e.g. \"QSV+OCL\", \"VideoToolbox+VT\") so you can see the path each encode is taking.\n\nA user on an Intel iGPU reported that a 2-hour 4K HDR film took ~90 minutes to generate on the prior version. The same encode finishes in roughly 10 minutes on this version.\n",
                 "targetAbi": "10.11.0.0",
