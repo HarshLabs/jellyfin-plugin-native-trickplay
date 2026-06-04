@@ -413,7 +413,21 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         var origQs = req.QueryString.Value ?? string.Empty;
         var innerQs = AppendQueryParam(origQs, SkipMarker, "1");
 
-        long bandwidth = ms?.Bitrate ?? video.BitRate ?? 8_000_000;
+        // RFC 8216 §4.6.2 + Apple HLS authoring spec: BANDWIDTH must be the PEAK
+        // segment bit rate, not the average. This wrap path serves stream-copy
+        // remuxes of VBR sources whose segment peaks routinely run 2-3× the
+        // container average — declaring the average makes AVPlayer enforce it
+        // per-segment (-12318 "Segment exceeds specified bandwidth for variant"),
+        // stop fetching, and permanently stall the single-variant stream (or, on
+        // a resume landing in a high-bitrate scene, never reach readyToPlay at
+        // all; both observed on tvOS 26, 2026-06-03). Over-declaring has no ABR
+        // cost on a single-variant master, so declare 3× the known average with
+        // a 60 Mbps floor — the floor covers sources whose container/stream
+        // metadata reports no bitrate at all (avg falls back to 8 Mbps, and
+        // 3× that would still undersell a high-bitrate 4K remux's peaks).
+        // AVERAGE-BANDWIDTH keeps the true average.
+        long avgBandwidth = ms?.Bitrate ?? video.BitRate ?? 8_000_000;
+        long bandwidth = Math.Max(avgBandwidth * 3, 60_000_000);
         // CRITICAL: codec strings must reflect what main.m3u8 actually serves,
         // NOT the source codec. Jellyfin transcodes DTS → AC-3, sometimes
         // converts h264 profile, etc. The URL's AudioCodec / VideoCodec query
@@ -438,7 +452,7 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 
         sb.Append("#EXT-X-STREAM-INF:");
         sb.Append(ci, $"BANDWIDTH={bandwidth}");
-        sb.Append(ci, $",AVERAGE-BANDWIDTH={bandwidth}");
+        sb.Append(ci, $",AVERAGE-BANDWIDTH={avgBandwidth}");
         if (!string.IsNullOrEmpty(videoRange))
         {
             sb.Append(ci, $",VIDEO-RANGE={videoRange}");
