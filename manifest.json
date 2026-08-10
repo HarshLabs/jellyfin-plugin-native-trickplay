@@ -13,8 +13,8 @@
                 "changelog": "Fixes playback stalling on Apple TV when audio is passed through unchanged (stream copy). The playlist could advertise the wrong audio format, which made the player wait forever for audio it was never going to get. If playback ever froze right after turning subtitles off, this is that fix.\n",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.51.0/native-trickplay_1.1.51.0.zip",
-                "checksum": "6022f6f92e96045de2d36aab273525c2",
-                "timestamp": "2026-08-10T15:20:16Z"
+                "checksum": "0509e568ae98a77ce061ce9dfe590844",
+                "timestamp": "2026-08-10T15:20:36Z"
             },
             {
                 "version": "1.1.50.0",
