@@ -62,6 +62,23 @@ public sealed class StartupResumeService : IHostedService, IDisposable
             {
                 return;
             }
+            // Reclaim runs first: after a server reinstall / DB rebuild the
+            // cache dirs reference the OLD install's item ids, so the resume
+            // scan below would classify every one of them as an orphan.
+            // Relinking them here means a user who reinstalls, points the
+            // cache path back at the old location, and restarts gets their
+            // full cache back without touching the dashboard.
+            try
+            {
+                if (Plugin.Instance?.Configuration is { Enabled: true })
+                {
+                    _cache.ReclaimOrphans();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[NativeTrickplay] startup reclaim scan failed");
+            }
             try
             {
                 ResumeInterruptedEncodes();
