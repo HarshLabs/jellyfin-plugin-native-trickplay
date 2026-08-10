@@ -9,6 +9,14 @@
         "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
         "versions": [
             {
+                "version": "1.1.52.0",
+                "changelog": "If you reinstall Jellyfin (or its database gets rebuilt) and point the plugin back at your existing cache folder, the plugin now relinks every cached entry to your library automatically \u2014 no re-encoding, no lost cache.\n\n- New: orphaned cache entries (from a reinstall or database rebuild) are automatically relinked to your items at server startup and before every scheduled prune run.\n- New: the dashboard shows a warning banner with a one-click \"Relink orphaned entries\" button whenever orphaned entries are detected.\n- Fixed: Cache Status no longer counts orphaned entries as cached (previously it could show 100% coverage while every item listed as \"not cached\" and playback re-encoded).\n- Fixed: the daily prune task no longer deletes a reinstalled server's still-valid cache \u2014 it relinks first and only removes entries that truly match nothing.\n\nUpdate, restart your server once, and your cache reconnects on its own within about 30 seconds \u2014 or press the new Relink button on the plugin dashboard.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.52.0/native-trickplay_1.1.52.0.zip",
+                "checksum": "38aacbee734a6214277d47ebb1fcc670",
+                "timestamp": "2026-08-10T21:54:10Z"
+            },
+            {
                 "version": "1.1.51.0",
                 "changelog": "Fixes playback stalling on Apple TV when audio is passed through unchanged (stream copy). The playlist could advertise the wrong audio format, which made the player wait forever for audio it was never going to get. If playback ever froze right after turning subtitles off, this is that fix.\n",
                 "targetAbi": "10.11.0.0",
