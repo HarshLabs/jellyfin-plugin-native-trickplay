@@ -75,6 +75,7 @@ public sealed class IframeAssetCache
     // items move to the front of the wait queue ahead of pending Normal
     // items.
     private readonly object _slotLock = new();
+    private int _maxSlots;
     private int _slotsAvailable;
     private readonly List<WaitNode> _waitQueue = new();
     private long _waitSequence;
@@ -187,7 +188,39 @@ public sealed class IframeAssetCache
         _serverConfig = serverConfig;
         _lifetime = lifetime;
         var max = Plugin.Instance?.Configuration.MaxConcurrentGenerations ?? 1;
-        _slotsAvailable = Math.Max(1, max);
+        _maxSlots = Math.Max(1, max);
+        _slotsAvailable = _maxSlots;
+
+        // React to dashboard config saves so "Concurrent encodes" applies
+        // without a server restart (the config page promises changes take
+        // effect immediately). Growing hands freed slots to waiters right
+        // away; shrinking lets running encodes finish and drains the excess
+        // naturally (_slotsAvailable goes negative until enough finish).
+        if (Plugin.Instance is not null)
+        {
+            Plugin.Instance.ConfigurationChanged += (_, cfg) =>
+            {
+                if (cfg is PluginConfiguration pc) UpdateMaxConcurrency(pc.MaxConcurrentGenerations);
+            };
+        }
+    }
+
+    private void UpdateMaxConcurrency(int newMax)
+    {
+        newMax = Math.Max(1, newMax);
+        int delta;
+        lock (_slotLock)
+        {
+            delta = newMax - _maxSlots;
+            if (delta == 0) return;
+            _maxSlots = newMax;
+            if (delta < 0) _slotsAvailable += delta;
+        }
+        _logger.LogInformation(
+            "[NativeTrickplay] concurrency updated to {Max} ({Delta:+#;-#} slots)", newMax, delta);
+        // Added slots are handed out through the normal release path so
+        // queued waiters wake in priority order.
+        for (int i = 0; i < delta; i++) ReleaseSlot();
     }
 
     /// <summary>
@@ -335,15 +368,52 @@ public sealed class IframeAssetCache
     /// </summary>
     public IframeAsset? TryGetCached(Guid itemId)
     {
+        if (!ValidateCached(itemId, out var playlistPath, out var segmentPath)) return null;
+        try
+        {
+            var template = File.ReadAllText(playlistPath);
+            _logger.LogDebug(
+                "[NativeTrickplay] cache HIT for {ItemId}: playlist={PlaylistBytes}B",
+                itemId, template.Length);
+            return new IframeAsset(template, segmentPath);
+        }
+        catch (IOException ex)
+        {
+            _logger.LogWarning(ex, "[NativeTrickplay] cache lookup IO error for {ItemId}", itemId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Presence-only variant of <see cref="TryGetCached"/> for callers that
+    /// need a yes/no answer, not the playlist body. TryGetCached reads the
+    /// full playlist text on every hit — harmless on the playback hot path
+    /// (one item), but the dashboard's item listing, the playlist injector's
+    /// pre-checks, and the prune task's stale scan were each paying a full
+    /// playlist read PER ITEM just to test existence: on a fully-cached
+    /// multi-thousand-item library that's hundreds of MB of file reads per
+    /// dashboard page load. Same validation semantics, no body read.
+    /// </summary>
+    public bool IsCached(Guid itemId) => ValidateCached(itemId, out _, out _);
+
+    /// <summary>
+    /// Shared validation core: item exists with a path, all three cache
+    /// files are present, the stamp parses, the source file's mtime still
+    /// matches, and the encoder tag matches what we'd produce today.
+    /// </summary>
+    private bool ValidateCached(Guid itemId, out string playlistPath, out string segmentPath)
+    {
+        playlistPath = string.Empty;
+        segmentPath = string.Empty;
         if (_libraryManager.GetItemById(itemId) is not BaseItem item || string.IsNullOrEmpty(item.Path))
         {
             _logger.LogDebug("[NativeTrickplay] cache lookup miss for {ItemId}: item not found or has no path", itemId);
-            return null;
+            return false;
         }
 
         var dir = Path.Combine(GetCacheRoot(), itemId.ToString("N"));
-        var playlistPath = Path.Combine(dir, "iframe.m3u8");
-        var segmentPath = Path.Combine(dir, "iframe.m4s");
+        playlistPath = Path.Combine(dir, "iframe.m3u8");
+        segmentPath = Path.Combine(dir, "iframe.m4s");
         var stampPath = Path.Combine(dir, ".source-mtime");
 
         if (!File.Exists(playlistPath) || !File.Exists(segmentPath) || !File.Exists(stampPath))
@@ -351,7 +421,7 @@ public sealed class IframeAssetCache
             _logger.LogDebug(
                 "[NativeTrickplay] cache lookup miss for {ItemId}: files absent (playlist={HasPlaylist} segment={HasSegment} stamp={HasStamp})",
                 itemId, File.Exists(playlistPath), File.Exists(segmentPath), File.Exists(stampPath));
-            return null;
+            return false;
         }
 
         try
@@ -369,14 +439,14 @@ public sealed class IframeAssetCache
                     "[NativeTrickplay] cache invalidated for {ItemId} ({Name}): legacy/corrupt stamp file — will re-encode (raw='{Raw}')",
                     itemId, item.Name,
                     stampContent.Length > 60 ? stampContent[..60] + "…" : stampContent);
-                return null;
+                return false;
             }
             if (stampedMtime != sourceMtime.Ticks)
             {
                 _logger.LogInformation(
                     "[NativeTrickplay] cache invalidated for {ItemId} ({Name}): source file modified since last encode (stamp={StampMtime} source={SourceMtime})",
                     itemId, item.Name, stampedMtime, sourceMtime.Ticks);
-                return null;
+                return false;
             }
 
             // Encoder must match the variant we'd produce now for this source —
@@ -388,19 +458,15 @@ public sealed class IframeAssetCache
                 _logger.LogInformation(
                     "[NativeTrickplay] cache invalidated for {ItemId} ({Name}): encoder tag mismatch (stamp='{StampEncoder}' expected='{ExpectedEncoder}')",
                     itemId, item.Name, stampedEncoder, expectedEncoder);
-                return null;
+                return false;
             }
 
-            var template = File.ReadAllText(playlistPath);
-            _logger.LogDebug(
-                "[NativeTrickplay] cache HIT for {ItemId} ({Name}): playlist={PlaylistBytes}B encoder={Encoder}",
-                itemId, item.Name, template.Length, stampedEncoder);
-            return new IframeAsset(template, segmentPath);
+            return true;
         }
         catch (IOException ex)
         {
             _logger.LogWarning(ex, "[NativeTrickplay] cache lookup IO error for {ItemId}", itemId);
-            return null;
+            return false;
         }
     }
 
@@ -1225,12 +1291,20 @@ public sealed class IframeAssetCache
             };
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null) return (false, false, null, null);
+            // Drain both pipes CONCURRENTLY with the wait. Reading stdout only
+            // after WaitForExit deadlocks when the child fills the ~64 KB
+            // stderr pipe buffer (corrupt files make ffprobe spew errors even
+            // at -v error): the child blocks on write, never exits, we burn
+            // the 3 s timeout and mis-probe the source as SDR/8-bit.
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
             if (!proc.WaitForExit(3000))
             {
                 proc.Kill(entireProcessTree: true);
                 return (false, false, null, null);
             }
-            var output = proc.StandardOutput.ReadToEnd().ToLowerInvariant();
+            var output = stdoutTask.GetAwaiter().GetResult().ToLowerInvariant();
+            _ = stderrTask;
             string Get(string key)
             {
                 foreach (var raw in output.Split('\n'))

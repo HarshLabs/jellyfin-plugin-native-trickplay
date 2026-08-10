@@ -109,7 +109,7 @@ public sealed class PruneTrickplayCacheTask : IScheduledTask
             // If item is gone, Phase 1 will pick it up. We only act on
             // "still in library but cache invalid" here.
             if (_libraryManager.GetItemById(entry.ItemId) is null) continue;
-            if (_cache.TryGetCached(entry.ItemId) is not null) continue;
+            if (_cache.IsCached(entry.ItemId)) continue;
 
             if (_cache.TryEvict(entry.ItemId))
             {

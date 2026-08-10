@@ -76,7 +76,7 @@ public sealed class PlaybackWarmupService : IHostedService, IDisposable
         // Skip the deferred encode entirely if the asset is already cached —
         // there's nothing to warm up, and we don't want to log a misleading
         // "queued in 30s" line for a cache hit.
-        if (_cache.TryGetCached(e.Item.Id) is not null)
+        if (_cache.IsCached(e.Item.Id))
         {
             _logger.LogDebug(
                 "[NativeTrickplay] warmup skipped for {Id} ({Name}) — already cached",
@@ -109,7 +109,7 @@ public sealed class PlaybackWarmupService : IHostedService, IDisposable
             // Re-check cache before launching — user may have already scrubbed
             // and triggered a synchronous regen via the controller's TryGetCached
             // miss path during the 30-second window.
-            if (_cache.TryGetCached(itemId) is not null) return;
+            if (_cache.IsCached(itemId)) return;
 
             // Playback is active for this item — mark High priority so the
             // encode leapfrogs any in-flight bulk/admin queue. Without this,

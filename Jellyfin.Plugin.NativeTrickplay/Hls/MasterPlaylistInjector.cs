@@ -290,7 +290,7 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         // cache-cold check — returning false makes the caller pass the master
         // through unchanged. Trickplay deferred to the next session after
         // PlaybackWarmupService finishes generating the cache.
-        if (_cache.TryGetCached(itemId) is null)
+        if (!_cache.IsCached(itemId))
         {
             _logger.LogInformation(
                 "[NativeTrickplay] TryAppendIframeVariant: iframe cache cold for {ItemId} — passing master.m3u8 through unchanged",
@@ -398,7 +398,7 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         // PlaybackWarmupService finishes generating the cache (T+30s,
         // background), the next playback session sees a hot cache and
         // gets the iframe variant for real trickplay.
-        if (_cache.TryGetCached(itemId) is null)
+        if (!_cache.IsCached(itemId))
         {
             _logger.LogInformation(
                 "[NativeTrickplay] TryWrapAsMaster: iframe cache cold for {ItemId} — passing main.m3u8 through unchanged (trickplay deferred to next session after warmup completes)",

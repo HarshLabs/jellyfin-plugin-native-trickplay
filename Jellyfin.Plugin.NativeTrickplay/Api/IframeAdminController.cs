@@ -527,39 +527,49 @@ public sealed class IframeAdminController : ControllerBase
         // Pattern table — first match wins for season/episode each, and the
         // matched span is removed from the working string so it doesn't
         // leak into the text tokens.
+        // TryParse, not Parse: `\d+` is unbounded, so a query like
+        // "S99999999999999999999" would make int.Parse throw
+        // OverflowException and 500 the whole request. Unparseable
+        // numbers just don't set season/episode (the matched text still
+        // gets stripped, same as any recognized-but-useless token).
+        static int? ParseCapture(Match m, int group) =>
+            int.TryParse(m.Groups[group].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)
+                ? n
+                : null;
+
         var patterns = new (string Pattern, Action<Match> Apply)[]
         {
             // SxxEyy: assign both
             (@"\bS(\d+)E(\d+)\b", m =>
             {
-                season ??= int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-                episode ??= int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+                season ??= ParseCapture(m, 1);
+                episode ??= ParseCapture(m, 2);
             }),
             // 1x05: alt season×episode
             (@"\b(\d+)x(\d+)\b", m =>
             {
-                season ??= int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-                episode ??= int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+                season ??= ParseCapture(m, 1);
+                episode ??= ParseCapture(m, 2);
             }),
             // Season N (with or without space)
             (@"\bSeason\s*(\d+)\b", m =>
             {
-                season ??= int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                season ??= ParseCapture(m, 1);
             }),
             // Episode N
             (@"\bEpisode\s*(\d+)\b", m =>
             {
-                episode ??= int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                episode ??= ParseCapture(m, 1);
             }),
             // Bare S<n>
             (@"\bS(\d+)\b", m =>
             {
-                season ??= int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                season ??= ParseCapture(m, 1);
             }),
             // Bare E<n>
             (@"\bE(\d+)\b", m =>
             {
-                episode ??= int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                episode ??= ParseCapture(m, 1);
             }),
         };
 
@@ -589,7 +599,7 @@ public sealed class IframeAdminController : ControllerBase
 
     private ItemRow MakeRow(BaseItem item, IReadOnlyDictionary<Guid, long> sizeByItem)
     {
-        var cached = _cache.TryGetCached(item.Id) is not null;
+        var cached = _cache.IsCached(item.Id);
         string? series = null;
         int? season = null, ep = null;
         if (item is Episode episode)

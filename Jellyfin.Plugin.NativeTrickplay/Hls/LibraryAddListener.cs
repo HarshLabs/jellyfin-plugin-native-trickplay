@@ -55,7 +55,7 @@ public sealed class LibraryAddListener : IHostedService
 
         // Skip if already cached (rare for ItemAdded but possible if the
         // file was re-added after a library remove).
-        if (_cache.TryGetCached(video.Id) is not null) return;
+        if (_cache.IsCached(video.Id)) return;
 
         _logger.LogInformation(
             "[NativeTrickplay] library-add: queueing encode for {Id} ({Name})",

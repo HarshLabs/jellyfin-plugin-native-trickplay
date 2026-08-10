@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Security.Claims;
 using Jellyfin.Plugin.NativeTrickplay.Hls;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -37,13 +38,52 @@ public sealed class IframeHlsController : ControllerBase
 
     private readonly IframeAssetCache _cache;
     private readonly ILibraryManager _libraryManager;
+    private readonly IUserManager _userManager;
     private readonly ILogger<IframeHlsController> _logger;
 
-    public IframeHlsController(IframeAssetCache cache, ILibraryManager libraryManager, ILogger<IframeHlsController> logger)
+    public IframeHlsController(
+        IframeAssetCache cache,
+        ILibraryManager libraryManager,
+        IUserManager userManager,
+        ILogger<IframeHlsController> logger)
     {
         _cache = cache;
         _libraryManager = libraryManager;
+        _userManager = userManager;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Per-user item visibility gate. [Authorize] only proves the caller
+    /// holds SOME valid token — without this check any authenticated user
+    /// (including ones restricted by library access or parental controls)
+    /// could pull the trickplay filmstrip of any item by GUID, which is a
+    /// low-resolution copy of the entire video. Mirrors Jellyfin's own
+    /// media endpoints: resolve the token's user and apply the standard
+    /// visibility check. API-key tokens carry no user identity and are
+    /// admin-provisioned — they bypass the check like they do server-wide.
+    /// </summary>
+    private bool CallerCanAccess(BaseItem item)
+    {
+        var claim = User.FindFirstValue("Jellyfin-UserId");
+        if (string.IsNullOrEmpty(claim) || !Guid.TryParse(claim, out var userId) || userId == Guid.Empty)
+        {
+            return true; // API key — no user scoping, admin-issued
+        }
+        var user = _userManager.GetUserById(userId);
+        if (user is null)
+        {
+            _logger.LogWarning("[NativeTrickplay] access denied: token user {UserId} no longer exists", userId);
+            return false;
+        }
+        if (!item.IsVisibleStandalone(user))
+        {
+            _logger.LogWarning(
+                "[NativeTrickplay] access denied: user {UserId} cannot see item {ItemId}",
+                userId, item.Id);
+            return false;
+        }
+        return true;
     }
 
     // [HttpHead] in addition to [HttpGet] so HDR-aware clients (JellyseerTV)
@@ -60,6 +100,12 @@ public sealed class IframeHlsController : ControllerBase
             return NotFound();
         }
         if (_libraryManager.GetItemById(itemId) is not BaseItem item || item.IsFolder || string.IsNullOrEmpty(item.Path))
+        {
+            return NotFound();
+        }
+        // 404 (not 403) on visibility failure so restricted users can't
+        // even confirm the item id exists.
+        if (!CallerCanAccess(item))
         {
             return NotFound();
         }
@@ -122,6 +168,13 @@ public sealed class IframeHlsController : ControllerBase
     public IActionResult GetSegment([FromRoute] Guid itemId)
     {
         if (Plugin.Instance is null || !Plugin.Instance.Configuration.Enabled)
+        {
+            return NotFound();
+        }
+        // Same item-resolution + visibility gate as the playlist route —
+        // the segment file IS the media content, so it must never be
+        // reachable for items the token's user can't see.
+        if (_libraryManager.GetItemById(itemId) is not BaseItem item || !CallerCanAccess(item))
         {
             return NotFound();
         }
