@@ -9,6 +9,14 @@
         "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
         "versions": [
             {
+                "version": "1.1.53.0",
+                "changelog": "- Fixed: trickplay playlists and image segments now enforce each user's library access and parental controls. Previously, any signed-in user could request the scrubbing thumbnails of items outside their allowed libraries.\n- Improved: the dashboard's item list loads dramatically faster on large libraries (it no longer reads every cached playlist from disk just to show cache status).\n- Improved: changing \"Concurrent encodes\" now takes effect immediately \u2014 no server restart needed.\n- Fixed: corrupt video files could make HDR detection time out, producing washed-out thumbnails for HDR content.\n- Fixed: searching with an extremely large season or episode number could error the item list.\n- Hardened the release pipeline: build steps are now pinned to exact, immutable versions.\n\nAfter updating, restart your server once as usual. No cache regeneration is required.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.53.0/native-trickplay_1.1.53.0.zip",
+                "checksum": "443797fad169835a18fbc7ee6eab4a3c",
+                "timestamp": "2026-08-10T22:59:35Z"
+            },
+            {
                 "version": "1.1.52.0",
                 "changelog": "If you reinstall Jellyfin (or its database gets rebuilt) and point the plugin back at your existing cache folder, the plugin now relinks every cached entry to your library automatically \u2014 no re-encoding, no lost cache.\n\n- New: orphaned cache entries (from a reinstall or database rebuild) are automatically relinked to your items at server startup and before every scheduled prune run.\n- New: the dashboard shows a warning banner with a one-click \"Relink orphaned entries\" button whenever orphaned entries are detected.\n- Fixed: Cache Status no longer counts orphaned entries as cached (previously it could show 100% coverage while every item listed as \"not cached\" and playback re-encoded).\n- Fixed: the daily prune task no longer deletes a reinstalled server's still-valid cache \u2014 it relinks first and only removes entries that truly match nothing.\n\nUpdate, restart your server once, and your cache reconnects on its own within about 30 seconds \u2014 or press the new Relink button on the plugin dashboard.\n",
                 "targetAbi": "10.11.0.0",
