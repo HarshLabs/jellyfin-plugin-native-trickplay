@@ -428,11 +428,11 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         // AVERAGE-BANDWIDTH keeps the true average.
         long avgBandwidth = ms?.Bitrate ?? video.BitRate ?? 8_000_000;
         long bandwidth = Math.Max(avgBandwidth * 3, 60_000_000);
-        // CRITICAL: codec strings must reflect what main.m3u8 actually serves,
-        // NOT the source codec. Jellyfin transcodes DTS → AC-3, sometimes
-        // converts h264 profile, etc. The URL's AudioCodec / VideoCodec query
-        // params carry the negotiated target codec — that's what AVPlayer
-        // will see in the segments, so that's what goes in STREAM-INF.
+        // CRITICAL: codec strings must reflect what main.m3u8 actually serves.
+        // The URL's AudioCodec / VideoCodec params are preference LISTS; the
+        // delivered audio codec is the SOURCE codec whenever it's in the list
+        // and stream copy is allowed (Jellyfin copies), else the transcode
+        // target. BuildAudioCodecStringFromUrl models that decision.
         string videoCodec = BuildVideoCodecString(video, req.Query);
         string audioCodec = BuildAudioCodecStringFromUrl(req.Query, audio);
         string? videoRange = MapVideoRange(video.VideoRangeType);
@@ -545,17 +545,36 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 
     private static string BuildAudioCodecStringFromUrl(IQueryCollection query, MediaStream? sourceAudio)
     {
-        // Prefer the negotiated target codec from the URL. Jellyfin transcodes
-        // unsupported audio (DTS, TrueHD raw, etc.) to AC-3/AAC for AVPlayer
-        // — declaring the source codec in STREAM-INF makes AVPlayer reject the
-        // variant. The URL's AudioCodec param is the actual delivered codec.
-        var urlAudio = (query["AudioCodec"].FirstOrDefault() ?? string.Empty)
+        // The URL's AudioCodec param is a PREFERENCE LIST, not the delivered
+        // codec. When the source codec appears in that list and audio stream
+        // copy isn't disabled, Jellyfin stream-copies — the delivered codec is
+        // the SOURCE codec regardless of list order. (Observed 2026-08-09: a
+        // client list of "flac,eac3,ac3,aac" over a stream-copied EAC3 source
+        // made this method declare fLaC; AVPlayer configures for the declared
+        // codec and the stream stalls unrecoverably with CoreMedia -15628.)
+        // Only when copy is impossible (source not in the list, or copy
+        // disabled) does the first list entry approximate the transcode target.
+        var urlList = (query["AudioCodec"].FirstOrDefault() ?? string.Empty)
             .Split(',', StringSplitOptions.RemoveEmptyEntries)
-            .FirstOrDefault()?.Trim().ToLowerInvariant();
+            .Select(c => c.Trim().ToLowerInvariant())
+            .ToArray();
 
-        var codec = string.IsNullOrEmpty(urlAudio)
-            ? (sourceAudio?.Codec ?? string.Empty).ToLowerInvariant()
-            : urlAudio;
+        var srcCodec = (sourceAudio?.Codec ?? string.Empty).ToLowerInvariant();
+        bool copyAllowed = !string.Equals(
+            query["allowAudioStreamCopy"].FirstOrDefault() ?? query["AllowAudioStreamCopy"].FirstOrDefault(),
+            "false",
+            StringComparison.OrdinalIgnoreCase);
+
+        string? codec;
+        if (copyAllowed && srcCodec.Length > 0 && urlList.Contains(srcCodec))
+        {
+            codec = srcCodec;
+        }
+        else
+        {
+            codec = urlList.FirstOrDefault();
+            if (string.IsNullOrEmpty(codec)) codec = srcCodec;
+        }
 
         return codec switch
         {
