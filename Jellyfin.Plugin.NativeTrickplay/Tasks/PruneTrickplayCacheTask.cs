@@ -55,6 +55,22 @@ public sealed class PruneTrickplayCacheTask : IScheduledTask
         // Snapshot config once per run — admin edits during a run shouldn't change behavior mid-flight.
         var cfg = Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
+        // Phase R (reclaim) — BEFORE the snapshot and before any deletion.
+        // After a server reinstall / DB rebuild every cache entry looks like
+        // an "orphan" (the directory GUIDs reference the old install's item
+        // ids) even though the media files and their finished trickplay
+        // assets are perfectly valid. Relink what we can first; only entries
+        // that genuinely match nothing are then eligible for phase 1
+        // deletion. Without this ordering, the first scheduled run after a
+        // reinstall would silently delete the user's entire cache.
+        var reclaimed = _cache.ReclaimOrphans();
+        if (reclaimed.Orphans > 0)
+        {
+            _logger.LogInformation(
+                "[NativeTrickplay] phase R (reclaim): relinked {Relinked} of {Orphans} orphaned entries",
+                reclaimed.Relinked, reclaimed.Orphans);
+        }
+
         // Materialize the snapshot up front. Iteration is cheap (file metadata only),
         // and we want a stable view for the size-cap phase that may need to evict by LRU order.
         var snapshot = _cache.EnumerateCache().ToList();

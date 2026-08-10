@@ -25,6 +25,13 @@ public sealed record IframeAsset(string PlaylistTemplate, string SegmentPath);
 public sealed record CacheEntry(Guid ItemId, string Directory, long SizeBytes, DateTime LastAccessUtc, bool IsComplete);
 
 /// <summary>
+/// Outcome of an orphan-reclaim pass. Orphans = complete cache entries whose
+/// directory GUID no longer resolves to a library item; Relinked = how many of
+/// those were matched to a current item and renamed to its id.
+/// </summary>
+public sealed record ReclaimResult(int Orphans, int Relinked);
+
+/// <summary>
 /// Snapshot of an in-flight generation, exposed to the dashboard for the
 /// progress UI. Status is one of "queued" (waiting on the global encoder
 /// semaphore) or "running" (ffmpeg actively encoding).
@@ -542,6 +549,178 @@ public sealed class IframeAssetCache
         }
     }
 
+    /// <summary>
+    /// Relink orphaned cache entries to their current library items. An entry
+    /// becomes an "orphan" when the item GUID its directory is named after no
+    /// longer exists — which happens to EVERY entry after a server reinstall
+    /// or database rebuild, because Jellyfin derives item ids from library
+    /// paths and re-mints them on the new install. The media files (and the
+    /// finished trickplay assets pointing at them) are typically untouched,
+    /// so instead of re-encoding the whole library we re-match each orphan to
+    /// its item and rename the directory to the new id.
+    ///
+    /// Matching, strongest first:
+    ///   1. Exact source-path match via the `.source-path` sidecar (written
+    ///      since v1.1.52; older entries don't have one).
+    ///   2. Source-file mtime ticks from the `.source-mtime` stamp vs the
+    ///      item's current file mtime. Ticks are 100 ns resolution, so a
+    ///      collision means two files share an identical timestamp — we only
+    ///      accept a strict 1:1 match (one candidate item ↔ one orphan) and
+    ///      leave anything ambiguous alone rather than guess wrong.
+    ///
+    /// Both paths require the stamp mtime to equal the file's CURRENT mtime —
+    /// an entry whose source changed since encoding would be invalidated by
+    /// TryGetCached anyway, so adopting it would be pointless.
+    /// </summary>
+    public ReclaimResult ReclaimOrphans()
+    {
+        var root = GetCacheRoot();
+
+        // 1. Collect complete orphans with a parseable stamp.
+        var orphans = new List<OrphanEntry>();
+        foreach (var entry in EnumerateCache())
+        {
+            if (!entry.IsComplete) continue;
+            if (_libraryManager.GetItemById(entry.ItemId) is not null) continue;
+            try
+            {
+                var stampContent = File.ReadAllText(Path.Combine(entry.Directory, ".source-mtime"));
+                if (!ParseStamp(stampContent, out var ticks, out _)) continue;
+                var pathFile = Path.Combine(entry.Directory, ".source-path");
+                string? sourcePath = File.Exists(pathFile) ? File.ReadAllText(pathFile).Trim() : null;
+                orphans.Add(new OrphanEntry(entry.Directory, ticks, sourcePath));
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        if (orphans.Count == 0) return new ReclaimResult(0, 0);
+
+        _logger.LogInformation(
+            "[NativeTrickplay] reclaim: {Count} orphaned cache entries found, matching against library...",
+            orphans.Count);
+
+        // 2. Candidate items: every playable video with a path that does NOT
+        //    already have a complete cache entry under its current id. Stat
+        //    each source file once — mtime is both the match key and the
+        //    freshness requirement.
+        var query = new InternalItemsQuery
+        {
+            IncludeItemTypes = PlayableVideoKinds,
+            Recursive = true,
+            IsVirtualItem = false,
+        };
+        var candidates = new List<(BaseItem Item, long MtimeTicks)>();
+        foreach (var item in _libraryManager.GetItemList(query))
+        {
+            if (item.IsFolder || string.IsNullOrEmpty(item.Path)) continue;
+            if (File.Exists(Path.Combine(root, item.Id.ToString("N"), ".source-mtime"))) continue;
+            try
+            {
+                candidates.Add((item, File.GetLastWriteTimeUtc(item.Path).Ticks));
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        int relinked = 0;
+        var claimed = new HashSet<string>(StringComparer.Ordinal); // orphan dirs already adopted
+        var matchedItems = new HashSet<Guid>();
+
+        // Pass 1: exact path matches (unique path per orphan only).
+        var byPath = orphans
+            .Where(o => !string.IsNullOrEmpty(o.SourcePath))
+            .GroupBy(o => o.SourcePath!, StringComparer.Ordinal)
+            .Where(g => g.Count() == 1)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        foreach (var (item, mtimeTicks) in candidates)
+        {
+            if (!byPath.TryGetValue(item.Path, out var orphan)) continue;
+            if (claimed.Contains(orphan.Directory)) continue;
+            if (orphan.MtimeTicks != mtimeTicks) continue; // source modified since encode — stale, skip
+            if (AdoptOrphan(orphan, item))
+            {
+                relinked++;
+                claimed.Add(orphan.Directory);
+                matchedItems.Add(item.Id);
+            }
+        }
+
+        // Pass 2: mtime-ticks matches, strict 1:1 on both sides.
+        var orphansByTicks = orphans
+            .Where(o => !claimed.Contains(o.Directory))
+            .GroupBy(o => o.MtimeTicks)
+            .ToDictionary(g => g.Key, g => g.ToList());
+        var candidatesByTicks = candidates
+            .Where(c => !matchedItems.Contains(c.Item.Id))
+            .GroupBy(c => c.MtimeTicks)
+            .ToDictionary(g => g.Key, g => g.ToList());
+        foreach (var (ticks, cands) in candidatesByTicks)
+        {
+            if (cands.Count != 1) continue;
+            if (!orphansByTicks.TryGetValue(ticks, out var os) || os.Count != 1) continue;
+            if (AdoptOrphan(os[0], cands[0].Item))
+            {
+                relinked++;
+                claimed.Add(os[0].Directory);
+            }
+        }
+
+        _logger.LogInformation(
+            "[NativeTrickplay] reclaim complete: relinked {Relinked} of {Orphans} orphaned entries",
+            relinked, orphans.Count);
+        return new ReclaimResult(orphans.Count, relinked);
+    }
+
+    private sealed record OrphanEntry(string Directory, long MtimeTicks, string? SourcePath);
+
+    /// <summary>
+    /// Rename an orphan directory to the adopting item's id and refresh its
+    /// `.source-path` sidecar. Skips items that are mid-encode (the encode
+    /// owns the target directory) — a rare race there surfaces as an
+    /// IOException from Move and is treated as "not adopted".
+    /// </summary>
+    private bool AdoptOrphan(OrphanEntry orphan, BaseItem item)
+    {
+        var key = item.Id.ToString("N");
+        if (_inflight.ContainsKey(key)) return false;
+
+        var newDir = Path.Combine(GetCacheRoot(), key);
+        try
+        {
+            if (Directory.Exists(newDir))
+            {
+                // Candidates were filtered to items with no stamp, so anything
+                // here is an incomplete leftover — replace it with the
+                // finished orphan.
+                Directory.Delete(newDir, recursive: true);
+            }
+            Directory.Move(orphan.Directory, newDir);
+            File.WriteAllText(Path.Combine(newDir, ".source-path"), item.Path);
+            _logger.LogInformation(
+                "[NativeTrickplay] reclaim: relinked cache entry to {ItemId} ({Name})",
+                item.Id, item.Name);
+            return true;
+        }
+        catch (IOException ex)
+        {
+            _logger.LogWarning(ex, "[NativeTrickplay] reclaim: failed to relink entry for {ItemId}", item.Id);
+            return false;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning(ex, "[NativeTrickplay] reclaim: failed to relink entry for {ItemId}", item.Id);
+            return false;
+        }
+    }
+
+    private static readonly Jellyfin.Data.Enums.BaseItemKind[] PlayableVideoKinds =
+    [
+        Jellyfin.Data.Enums.BaseItemKind.Movie,
+        Jellyfin.Data.Enums.BaseItemKind.Episode,
+        Jellyfin.Data.Enums.BaseItemKind.MusicVideo,
+        Jellyfin.Data.Enums.BaseItemKind.Video,
+    ];
+
     public bool TryEvict(Guid itemId)
     {
         var key = itemId.ToString("N");
@@ -701,6 +880,12 @@ public sealed class IframeAssetCache
 
             File.Move(tmpSegmentPath, segmentPath, overwrite: true);
             await File.WriteAllTextAsync(playlistPath, template, ictk).ConfigureAwait(false);
+            // Source path sidecar — lets ReclaimOrphans re-match this entry to
+            // its item by exact path if the item's GUID ever changes (server
+            // reinstall / DB rebuild / library move). Written BEFORE the stamp
+            // so the stamp stays the completeness marker (last file written).
+            await File.WriteAllTextAsync(Path.Combine(dir, ".source-path"), sourcePath, ictk)
+                .ConfigureAwait(false);
             await File.WriteAllTextAsync(stampPath, FormatStamp(sourceMtime.Ticks, encoderTag), ictk)
                 .ConfigureAwait(false);
 

@@ -80,6 +80,20 @@
     #NativeTrickplayConfigPage .ntp-libcoverage-bar-fill { height: 100%; background: linear-gradient(90deg, #34c759, #30a3f0); transition: width 0.3s ease; }
     #NativeTrickplayConfigPage .ntp-libcoverage-counts { font-variant-numeric: tabular-nums; opacity: 0.75; font-size: 0.9em; text-align: right; }
 
+    #NativeTrickplayConfigPage .ntp-orphan-notice {
+        display: flex;
+        align-items: center;
+        gap: 1em;
+        background: rgba(255,159,10,0.12);
+        border: 1px solid rgba(255,159,10,0.35);
+        border-radius: 8px;
+        padding: 0.8em 1em;
+        margin-bottom: 1.5em;
+    }
+    #NativeTrickplayConfigPage .ntp-orphan-notice-text { flex: 1; line-height: 1.45; font-size: 0.92em; }
+    #NativeTrickplayConfigPage .ntp-orphan-notice-text strong { color: #ff9f0a; }
+    #NativeTrickplayConfigPage .ntp-orphan-notice .ntp-btn { flex-shrink: 0; }
+
     #NativeTrickplayConfigPage .ntp-table { width: 100%; border-collapse: collapse; }
     #NativeTrickplayConfigPage .ntp-table th {
         text-align: left; padding: 0.85em 0.75em;
@@ -609,6 +623,9 @@
         #NativeTrickplayConfigPage .ntp-libcoverage-row:last-child { border-bottom: none; }
         #NativeTrickplayConfigPage .ntp-libcoverage-counts { text-align: left; }
 
+        #NativeTrickplayConfigPage .ntp-orphan-notice { flex-direction: column; align-items: stretch; }
+        #NativeTrickplayConfigPage .ntp-orphan-notice .ntp-btn { width: 100%; }
+
         #NativeTrickplayConfigPage .ntp-form-footer {
             flex-direction: column-reverse; align-items: stretch;
         }
@@ -807,6 +824,16 @@
                         <button class="ntp-btn ntp-btn-secondary ntp-btn-sm" id="ntpRefreshStatusBtn" type="button">Refresh</button>
                     </div>
                     <div class="ntp-stat-grid" id="ntpStatTotals" style="margin-bottom:1.5em;"></div>
+                    <!-- Orphan banner: shown when complete cache entries exist
+                         whose item ids no longer resolve — the signature of a
+                         server reinstall / DB rebuild with a surviving cache
+                         directory. Offers one-click relinking instead of
+                         letting the user (or the daily pruner) throw the
+                         cache away and re-encode everything. -->
+                    <div id="ntpOrphanNotice" class="ntp-orphan-notice" style="display:none;">
+                        <div class="ntp-orphan-notice-text" id="ntpOrphanNoticeText"></div>
+                        <button type="button" id="ntpReclaimBtn" class="ntp-btn ntp-btn-primary ntp-btn-sm">Relink orphaned entries</button>
+                    </div>
                     <div id="ntpLibCoverage" class="ntp-libcoverage"></div>
                 </div>
 
@@ -1285,6 +1312,23 @@
                     '<div><div class="ntp-stat-value">' + ntpFmtBytes(s.CachedBytes) + '</div><div class="ntp-stat-label">Cache on disk</div></div>' +
                     '<div><div class="ntp-stat-value">' + libsTotal + '</div><div class="ntp-stat-label">Library items</div></div>' +
                     '<div><div class="ntp-stat-value">' + (libsTotal > 0 ? Math.round(100 * s.CachedItems / libsTotal) + '%' : '—') + '</div><div class="ntp-stat-label">Coverage</div></div>';
+
+                // Orphan banner — entries on disk that no current item id
+                // matches (server reinstall / DB rebuild signature). These
+                // are excluded from the cached counts above; surface them
+                // with a one-click relink instead of silently undercounting.
+                var orphans = s.OrphanedItems || 0;
+                var noticeEl = document.querySelector('#ntpOrphanNotice');
+                if (orphans > 0) {
+                    document.querySelector('#ntpOrphanNoticeText').innerHTML =
+                        '<strong>' + orphans + ' orphaned cache ' + (orphans === 1 ? 'entry' : 'entries')
+                        + ' · ' + ntpFmtBytes(s.OrphanedBytes) + '</strong> — these don\'t match any current library item id, '
+                        + 'which usually means the server was reinstalled or its database rebuilt. '
+                        + 'Relinking matches them back to your items by source file so nothing has to re-encode.';
+                    noticeEl.style.display = 'flex';
+                } else {
+                    noticeEl.style.display = 'none';
+                }
 
                 var libsHtml = s.Libraries.map(function (lib) {
                     var pct = lib.TotalItems > 0 ? Math.round(100 * lib.CachedItems / lib.TotalItems) : 0;
@@ -1982,6 +2026,26 @@
 
         // ── Wire up all UI events ─────────────────────────────────────────
         document.querySelector('#ntpRefreshStatusBtn').addEventListener('click', ntpRefreshStatus);
+        document.querySelector('#ntpReclaimBtn').addEventListener('click', function () {
+            var btn = this;
+            ntpWithBusy(btn, function () {
+                btn.textContent = 'Relinking…';
+                return ntpFetch('Reclaim', { type: 'POST' }).then(function (r) {
+                    if (r.Relinked > 0) {
+                        var msg = 'Relinked ' + r.Relinked + ' of ' + r.Orphans + ' orphaned entries';
+                        if (r.Relinked < r.Orphans) msg += ' — the rest didn\'t match any library item';
+                        ntpToast(msg, 'success');
+                    } else {
+                        ntpToast('No orphaned entries could be matched to library items', 'warning');
+                    }
+                    // Refresh both the status widget and the item table so
+                    // relinked rows flip to "cached" without a manual reload.
+                    return Promise.all([ntpRefreshStatus(), ntpRunSearch()]);
+                }).catch(function (err) {
+                    ntpToast('Relink failed' + (err && err.message ? ': ' + err.message : ''), 'error');
+                });
+            });
+        });
 
         // Debounced live search: re-run 280ms after typing stops.
         // Enter fires immediately and cancels any pending debounce.

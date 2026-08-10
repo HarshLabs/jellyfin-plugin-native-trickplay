@@ -70,7 +70,30 @@ public sealed class IframeAdminController : ControllerBase
         // StartupResumeService re-creates those directories with no stamp;
         // counting them would inflate the "cached items" KPI to ~100% when
         // most of those rows are still queuing up to be re-encoded.
-        var cachedEntries = _cache.EnumerateCache().Where(e => e.IsComplete).ToList();
+        // Split complete entries into ones whose GUID still resolves to a
+        // library item vs orphans (typically the aftermath of a server
+        // reinstall / DB rebuild, where every item got a new id but the old
+        // cache directory names keep the old ones). Orphans must NOT count
+        // toward the "cached items" KPI — before this split, a reinstalled
+        // server pointing at its old cache showed "4016 of 3999 · 100%"
+        // while every per-library row and every playback lookup missed.
+        var completeEntries = _cache.EnumerateCache().Where(e => e.IsComplete).ToList();
+        var cachedEntries = new List<CacheEntry>();
+        int orphanedItems = 0;
+        long orphanedBytes = 0;
+        foreach (var entry in completeEntries)
+        {
+            if (_libraryManager.GetItemById(entry.ItemId) is null)
+            {
+                orphanedItems++;
+                orphanedBytes += entry.SizeBytes;
+            }
+            else
+            {
+                cachedEntries.Add(entry);
+            }
+        }
+
         long cachedBytes = cachedEntries.Sum(e => e.SizeBytes);
         var cachedIds = new HashSet<Guid>(cachedEntries.Select(e => e.ItemId));
 
@@ -95,6 +118,8 @@ public sealed class IframeAdminController : ControllerBase
         return new StatusResponse(
             cachedEntries.Count,
             cachedBytes,
+            orphanedItems,
+            orphanedBytes,
             libraries.OrderBy(l => l.Name).ToList(),
             // Logical core count of the box Jellyfin is running on. The
             // dashboard uses this to render a recommended "Concurrent
@@ -453,6 +478,27 @@ public sealed class IframeAdminController : ControllerBase
     }
 
     /// <summary>
+    /// Relink orphaned cache entries to their current library items — the
+    /// recovery path after a server reinstall / DB rebuild where item GUIDs
+    /// changed but the media files and their finished trickplay assets did
+    /// not. Backs the dashboard's "Relink orphaned entries" banner button;
+    /// matching rules live in <see cref="IframeAssetCache.ReclaimOrphans"/>.
+    /// Synchronous: a few thousand entries stat one file each, so worst case
+    /// is a handful of seconds on spinning disks — acceptable for an
+    /// explicit admin action, and returning the counts inline lets the UI
+    /// report "relinked N of M" without polling.
+    /// </summary>
+    [HttpPost("Reclaim")]
+    public ActionResult<ReclaimResult> Reclaim()
+    {
+        var result = _cache.ReclaimOrphans();
+        _logger.LogInformation(
+            "[NativeTrickplay] admin Reclaim: relinked {Relinked} of {Orphans} orphaned entries",
+            result.Relinked, result.Orphans);
+        return result;
+    }
+
+    /// <summary>
     /// Parse a free-form search string into (text tokens, season?, episode?).
     /// All non-S/E whitespace-separated words become tokens that must ALL
     /// match (AND-logic) somewhere in the candidate's Name or SeriesName.
@@ -566,7 +612,10 @@ public sealed class IframeAdminController : ControllerBase
     }
 
     public sealed record ProgressResponse(int InflightCount, DateTime ServerUtc, IReadOnlyList<InflightState> Inflight);
-    public sealed record StatusResponse(int CachedItems, long CachedBytes, IReadOnlyList<LibraryStatus> Libraries, int CpuCores);
+    public sealed record StatusResponse(
+        int CachedItems, long CachedBytes,
+        int OrphanedItems, long OrphanedBytes,
+        IReadOnlyList<LibraryStatus> Libraries, int CpuCores);
     public sealed record LibraryStatus(Guid Id, string Name, int TotalItems, int CachedItems);
     public sealed record ItemsResponse(int Total, int Offset, int Limit, IReadOnlyList<ItemRow> Items);
     public sealed record ItemRow(
