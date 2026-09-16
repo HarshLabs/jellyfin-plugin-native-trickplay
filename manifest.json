@@ -9,6 +9,14 @@
         "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
         "versions": [
             {
+                "version": "1.1.54.0",
+                "changelog": "Videos whose HEVC stream declares a level above 5.0 (common with certain x265 encodes) were rejected by the Apple TV when served through the trickplay-enabled playlist, and the player fell back to the thumbnail track. The playlist now also offers a level 5.0 entry, the same approach Jellyfin uses for its own playlists, so these videos play normally with scrubbing thumbnails intact. No change for other videos.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.54.0/native-trickplay_1.1.54.0.zip",
+                "checksum": "42d250ef990e9b6d4131d2f2bc522acf",
+                "timestamp": "2026-09-16T19:46:58Z"
+            },
+            {
                 "version": "1.1.53.0",
                 "changelog": "- Fixed: trickplay playlists and image segments now enforce each user's library access and parental controls. Previously, any signed-in user could request the scrubbing thumbnails of items outside their allowed libraries.\n- Improved: the dashboard's item list loads dramatically faster on large libraries (it no longer reads every cached playlist from disk just to show cache status).\n- Improved: changing \"Concurrent encodes\" now takes effect immediately \u2014 no server restart needed.\n- Fixed: corrupt video files could make HDR detection time out, producing washed-out thumbnails for HDR content.\n- Fixed: searching with an extremely large season or episode number could error the item list.\n- Hardened the release pipeline: build steps are now pinned to exact, immutable versions.\n\nAfter updating, restart your server once as usual. No cache regeneration is required.\n",
                 "targetAbi": "10.11.0.0",
