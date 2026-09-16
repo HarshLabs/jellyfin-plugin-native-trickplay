@@ -56,6 +56,9 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
     // at typical IframeWidth (320–720) without violating the "measured peak <
     // 110% of BANDWIDTH" tolerance from the spec.
     private const long IframeBandwidth = 1_000_000;
+    // HEVC level (×30, so 150 = 5.0) above which Apple TV rejects a declared
+    // CODECS entry outright. Same threshold Jellyfin uses in DynamicHlsHelper.
+    private const int HevcLevelFallback = 150;
 
     // Track PlaySessionIds whose master.m3u8 we've already augmented with
     // the I-frame variant. If a later main.m3u8 fetch comes in for the
@@ -433,7 +436,8 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         // delivered audio codec is the SOURCE codec whenever it's in the list
         // and stream copy is allowed (Jellyfin copies), else the transcode
         // target. BuildAudioCodecStringFromUrl models that decision.
-        string videoCodec = BuildVideoCodecString(video, req.Query);
+        var primaryCodec = BuildVideoCodecString(video, req.Query);
+        string videoCodec = primaryCodec.Codec;
         string audioCodec = BuildAudioCodecStringFromUrl(req.Query, audio);
         string? videoRange = MapVideoRange(video.VideoRangeType);
         int? width = video.Width;
@@ -450,24 +454,29 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         sb.AppendLine("#EXTM3U");
         sb.AppendLine("#EXT-X-VERSION:6");
 
-        sb.Append("#EXT-X-STREAM-INF:");
-        sb.Append(ci, $"BANDWIDTH={bandwidth}");
-        sb.Append(ci, $",AVERAGE-BANDWIDTH={avgBandwidth}");
-        if (!string.IsNullOrEmpty(videoRange))
+        var mediaUri = "main.m3u8" + innerQs;
+        AppendStreamInf(sb, bandwidth, avgBandwidth, videoRange, videoCodec, audioCodec, width, height, fps, mediaUri);
+
+        // Apple TV refuses a variant whose CODECS declares an HEVC level above 5.0
+        // (e.g. hvc1.1.6.L186.B0 from a 1080p24 x265 encode stamped "level 6.2"),
+        // even though the hardware decodes the stream fine. When that is the only
+        // regular variant, AVPlayer silently plays our I-FRAME variant instead —
+        // a thumbnail slideshow with no audio (device-confirmed 2026-09-16). Jellyfin's
+        // own master.m3u8 has carried the same workaround since 2020
+        // (DynamicHlsHelper: "Provide Level 5.0 entrance for backward compatibility"):
+        // a second STREAM-INF, identical but declaring L150, pointing at the same
+        // media playlist. Mirror it. Devices that accept the true level pick the
+        // first line; devices that reject it fall through to the second instead of
+        // to the I-frames. Only SDR/Unknown range reaches this method (HDR passes
+        // through above), which matches Jellyfin's SDR-only condition.
+        if (primaryCodec.IsHevc && primaryCodec.Level > HevcLevelFallback)
         {
-            sb.Append(ci, $",VIDEO-RANGE={videoRange}");
+            var fallbackCodec = BuildVideoCodecString(video, req.Query, HevcLevelFallback).Codec;
+            AppendStreamInf(sb, bandwidth, avgBandwidth, videoRange, fallbackCodec, audioCodec, width, height, fps, mediaUri);
+            _logger.LogInformation(
+                "[NativeTrickplay] TryWrapAsMaster: HEVC level {Level} > {Max} for {ItemId} — added L{Max} fallback variant ({Fallback})",
+                primaryCodec.Level, HevcLevelFallback, itemId, fallbackCodec);
         }
-        sb.Append(ci, $",CODECS=\"{videoCodec},{audioCodec}\"");
-        if (width is > 0 && height is > 0)
-        {
-            sb.Append(ci, $",RESOLUTION={width}x{height}");
-        }
-        if (fps is > 0)
-        {
-            sb.Append(ci, $",FRAME-RATE={fps.Value:F3}");
-        }
-        sb.AppendLine();
-        sb.Append("main.m3u8").Append(innerQs).AppendLine();
 
         var iframeLine = BuildIframeStreamInfLine(itemId, origQs, iframeVariant, iframeW, iframeH);
         sb.AppendLine(iframeLine);
@@ -486,7 +495,39 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         return queryString + sep + key + "=" + Uri.EscapeDataString(value);
     }
 
-    private static string BuildVideoCodecString(MediaStream video, IQueryCollection query)
+    /// <summary>
+    /// Writes one <c>#EXT-X-STREAM-INF</c> line plus its media URI. Attribute set
+    /// and order match Jellyfin's own master.m3u8.
+    /// </summary>
+    private static void AppendStreamInf(
+        StringBuilder sb, long bandwidth, long avgBandwidth, string? videoRange,
+        string videoCodec, string audioCodec, int? width, int? height, double? fps, string mediaUri)
+    {
+        var ci = CultureInfo.InvariantCulture;
+        sb.Append("#EXT-X-STREAM-INF:");
+        sb.Append(ci, $"BANDWIDTH={bandwidth}");
+        sb.Append(ci, $",AVERAGE-BANDWIDTH={avgBandwidth}");
+        if (!string.IsNullOrEmpty(videoRange))
+        {
+            sb.Append(ci, $",VIDEO-RANGE={videoRange}");
+        }
+        sb.Append(ci, $",CODECS=\"{videoCodec},{audioCodec}\"");
+        if (width is > 0 && height is > 0)
+        {
+            sb.Append(ci, $",RESOLUTION={width}x{height}");
+        }
+        if (fps is > 0)
+        {
+            sb.Append(ci, $",FRAME-RATE={fps.Value:F3}");
+        }
+        sb.AppendLine();
+        sb.AppendLine(mediaUri);
+    }
+
+    /// <summary>Result of <see cref="BuildVideoCodecString"/>: the CODECS entry plus what it declared.</summary>
+    private readonly record struct VideoCodecEntry(string Codec, bool IsHevc, int Level);
+
+    private static VideoCodecEntry BuildVideoCodecString(MediaStream video, IQueryCollection query, int? levelOverride = null)
     {
         var ci = CultureInfo.InvariantCulture;
 
@@ -508,7 +549,7 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
 
         var codec = targetCodec;
         // Pull profile/level/bit-depth either from URL hints (target) or stream (source).
-        int level = TryParseInt(query[$"{codec}-level"].FirstOrDefault(), 0);
+        int level = levelOverride ?? TryParseInt(query[$"{codec}-level"].FirstOrDefault(), 0);
         if (level == 0) level = (int)Math.Round(video.Level ?? 0.0);
         var profile = (query[$"{codec}-profile"].FirstOrDefault() ?? video.Profile ?? string.Empty).ToLowerInvariant();
         var bitDepthStr = query[$"{codec}-videobitdepth"].FirstOrDefault();
@@ -522,11 +563,11 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
             int profileIdc = bitDepth >= 10 ? 2 : 1;
             int compat = profileIdc == 2 ? 4 : 6;
             int lvl = level > 0 ? level : 120;   // 4.0 fallback
-            return string.Create(ci, $"hvc1.{profileIdc}.{compat:X}.L{lvl}.B0");
+            return new VideoCodecEntry(string.Create(ci, $"hvc1.{profileIdc}.{compat:X}.L{lvl}.B0"), true, lvl);
         }
         if (codec is "av1")
         {
-            return bitDepth >= 10 ? "av01.0.05M.10" : "av01.0.05M.08";
+            return new VideoCodecEntry(bitDepth >= 10 ? "av01.0.05M.10" : "av01.0.05M.08", false, level);
         }
 
         // h264 / avc / fallback. avc1.PPCCLL hex.
@@ -540,7 +581,7 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         };
         int compat264 = profileIdc264 == 0x42 ? 0xE0 : 0x00;
         int level264 = level > 0 ? level : 40; // 4.0
-        return string.Create(ci, $"avc1.{profileIdc264:X2}{compat264:X2}{level264:X2}");
+        return new VideoCodecEntry(string.Create(ci, $"avc1.{profileIdc264:X2}{compat264:X2}{level264:X2}"), false, level264);
     }
 
     private static string BuildAudioCodecStringFromUrl(IQueryCollection query, MediaStream? sourceAudio)
