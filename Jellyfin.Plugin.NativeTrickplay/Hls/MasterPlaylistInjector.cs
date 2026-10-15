@@ -537,22 +537,37 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         // in the URL.
         var urlList = (query["VideoCodec"].FirstOrDefault() ?? string.Empty)
             .Split(',', StringSplitOptions.RemoveEmptyEntries);
-        string? targetCodec = null;
-        foreach (var c in urlList)
+        // When Jellyfin will stream-copy, the delivered codec is the SOURCE codec whatever the
+        // list order (EncodingHelper.CanStreamCopyVideo: AllowVideoStreamCopy and the source codec
+        // in VideoCodec, within any <codec>-level / -videobitdepth / -profile limits). Declaring
+        // the first list entry instead labelled a copied 10-bit H.264 as hvc1 for a client that
+        // sends VideoCodec=hevc,h264, and AVPlayer configured the wrong decoder first (slow,
+        // timed-out start). The same rule the audio declaration already follows.
+        var sourceCodec = (video.Codec ?? string.Empty).ToLowerInvariant();
+        bool copiesSource = WillStreamCopyVideo(video, sourceCodec, urlList, query);
+
+        string? targetCodec = copiesSource ? sourceCodec : null;
+        if (targetCodec is null)
         {
-            var name = c.Trim().ToLowerInvariant();
-            if (query.ContainsKey(name + "-level")) { targetCodec = name; break; }
+            foreach (var c in urlList)
+            {
+                var name = c.Trim().ToLowerInvariant();
+                if (query.ContainsKey(name + "-level")) { targetCodec = name; break; }
+            }
         }
         // Fallbacks: first codec in list, then source MediaStream's codec.
         targetCodec ??= urlList.FirstOrDefault()?.Trim().ToLowerInvariant();
-        targetCodec ??= (video.Codec ?? string.Empty).ToLowerInvariant();
+        targetCodec ??= sourceCodec;
 
         var codec = targetCodec;
-        // Pull profile/level/bit-depth either from URL hints (target) or stream (source).
-        int level = levelOverride ?? TryParseInt(query[$"{codec}-level"].FirstOrDefault(), 0);
-        if (level == 0) level = (int)Math.Round(video.Level ?? 0.0);
-        var profile = (query[$"{codec}-profile"].FirstOrDefault() ?? video.Profile ?? string.Empty).ToLowerInvariant();
-        var bitDepthStr = query[$"{codec}-videobitdepth"].FirstOrDefault();
+        // A copied stream keeps the source's profile, level and bit depth; a transcode targets
+        // the URL hints, with the source as the fallback.
+        int level = levelOverride ?? (copiesSource ? 0 : TryParseInt(query[$"{codec}-level"].FirstOrDefault(), 0));
+        // The source level only describes the target when it is the same codec (an H.264
+        // level 51 is no HEVC level); otherwise the per-codec defaults below apply.
+        if (level == 0 && codec == sourceCodec) level = (int)Math.Round(video.Level ?? 0.0);
+        var profile = ((copiesSource ? video.Profile : query[$"{codec}-profile"].FirstOrDefault() ?? video.Profile) ?? string.Empty).ToLowerInvariant();
+        var bitDepthStr = copiesSource ? null : query[$"{codec}-videobitdepth"].FirstOrDefault();
         var bitDepth = int.TryParse(bitDepthStr, out var bd) ? bd : (video.BitDepth ?? 8);
 
         if (codec is "hevc" or "h265")
@@ -571,17 +586,49 @@ public sealed class MasterPlaylistInjector : IAsyncResultFilter
         }
 
         // h264 / avc / fallback. avc1.PPCCLL hex.
-        int profileIdc264 = profile switch
+        // Jellyfin reports ffprobe's profile names ("High 10", "High 4:4:4 Predictive"); URL hints
+        // drop the spaces ("high10"). Compare without them.
+        int profileIdc264 = profile.Replace(" ", string.Empty, StringComparison.Ordinal) switch
         {
-            "baseline" or "constrained baseline" => 0x42,
+            "baseline" or "constrainedbaseline" => 0x42,
             "main" => 0x4D,
-            "high10" => 0x6E,
-            "high422" or "high 4:2:2" => 0x7A,
-            _ => 0x64 // high
+            "high10" or "high10intra" => 0x6E,
+            "high422" or "high4:2:2" or "high4:2:2intra" => 0x7A,
+            "high444" or "high4:4:4" or "high4:4:4predictive" or "high4:4:4intra" => 0xF4,
+            _ => bitDepth >= 10 ? 0x6E : 0x64 // high; a 10-bit stream with no profile name is High 10
         };
         int compat264 = profileIdc264 == 0x42 ? 0xE0 : 0x00;
         int level264 = level > 0 ? level : 40; // 4.0
         return new VideoCodecEntry(string.Create(ci, $"avc1.{profileIdc264:X2}{compat264:X2}{level264:X2}"), false, level264);
+    }
+
+    /// <summary>
+    /// Whether Jellyfin will copy the source video, per the request-visible conditions of
+    /// <c>EncodingHelper.CanStreamCopyVideo</c>: copy allowed, no burned-in subtitles, the source
+    /// codec in the requested list, and within any level, bit-depth and profile limits for it.
+    /// Conditions this layer can't see (interlacing, anamorphic, range) fall back to the list.
+    /// </summary>
+    private static bool WillStreamCopyVideo(MediaStream video, string sourceCodec, string[] urlList, IQueryCollection query)
+    {
+        if (sourceCodec.Length == 0) return false;
+        var allow = query["allowVideoStreamCopy"].FirstOrDefault() ?? query["AllowVideoStreamCopy"].FirstOrDefault();
+        if (string.Equals(allow, "false", StringComparison.OrdinalIgnoreCase)) return false;
+        var subtitleMethod = query["SubtitleMethod"].FirstOrDefault() ?? query["subtitleMethod"].FirstOrDefault();
+        if (string.Equals(subtitleMethod, "Encode", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!urlList.Any(c => string.Equals(c.Trim(), sourceCodec, StringComparison.OrdinalIgnoreCase))) return false;
+
+        var maxLevel = TryParseInt(query[$"{sourceCodec}-level"].FirstOrDefault(), 0);
+        if (maxLevel > 0 && video.Level is double lvl && lvl > maxLevel) return false;
+        var maxDepth = TryParseInt(query[$"{sourceCodec}-videobitdepth"].FirstOrDefault(), 0);
+        if (maxDepth > 0 && video.BitDepth is int depth && depth > maxDepth) return false;
+        var profiles = (query[$"{sourceCodec}-profile"].FirstOrDefault() ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (profiles.Length > 0 && !string.IsNullOrEmpty(video.Profile)
+            && !profiles.Contains(video.Profile.Replace(" ", string.Empty, StringComparison.Ordinal), StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        return true;
     }
 
     private static string BuildAudioCodecStringFromUrl(IQueryCollection query, MediaStream? sourceAudio)
