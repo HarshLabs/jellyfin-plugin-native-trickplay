@@ -9,6 +9,14 @@
         "imageUrl": "https://raw.githubusercontent.com/HarshLabs/jellyfin-plugin-native-trickplay/main/assets/icon.png",
         "versions": [
             {
+                "version": "1.1.55.0",
+                "changelog": "When Jellyfin played a video without converting it, the trickplay playlist could name the wrong video format (for example HEVC for a 10-bit H.264 file), so the Apple TV prepared the wrong decoder and took much longer to start. The playlist now names the format Jellyfin actually sends, including 10-bit H.264 (High 10). No change for HDR or Dolby Vision videos.\n",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/HarshLabs/jellyfin-plugin-native-trickplay/releases/download/v1.1.55.0/native-trickplay_1.1.55.0.zip",
+                "checksum": "375a88086021c8538411b0da068ae8e9",
+                "timestamp": "2026-10-15T04:11:20Z"
+            },
+            {
                 "version": "1.1.54.0",
                 "changelog": "Videos whose HEVC stream declares a level above 5.0 (common with certain x265 encodes) were rejected by the Apple TV when served through the trickplay-enabled playlist, and the player fell back to the thumbnail track. The playlist now also offers a level 5.0 entry, the same approach Jellyfin uses for its own playlists, so these videos play normally with scrubbing thumbnails intact. No change for other videos.\n",
                 "targetAbi": "10.11.0.0",
